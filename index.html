@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase Test</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            cursor: pointer;
+            background: #3ECF8E;
+            color: white;
+            border: none;
+            border-radius: 6px;
+        }
+        button:hover {
+            background: #38b882;
+        }
+        .form-group {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            flex: 1;
+        }
+        #taskList {
+            list-style: none;
+            padding: 0;
+            margin-top: 20px;
+        }
+        #taskList li {
+            padding: 12px;
+            background: #f5f5f5;
+            margin-bottom: 8px;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Supabase Test</h1>
+
+    <div class="form-group">
+        <input type="text" id="taskInput" placeholder="Название задачи">
+        <button id="createBtn">Создать</button>
+    </div>
+
+    <h2>Задачи</h2>
+    <ul id="taskList"></ul>
+
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <script>
+        const supabaseUrl = 'https://wrljgnldxzekaztmxcjn.supabase.co'
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndybGpnbmxkeHpla2F6dG14Y2puIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkyNDcxMDQsImV4cCI6MjA4NDgyMzEwNH0.-lT_q8HiYNL1TXT7HdplMLrC4PKr6QKUIm2Q2G_IrxA'
+
+        const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey)
+
+        async function loadTasks() {
+            const { data, error } = await supabaseClient
+                .from('tasks')
+                .select('*')
+                .order('created_at', { ascending: false })
+
+            const taskList = document.getElementById('taskList')
+
+            if (error) {
+                console.error('Ошибка загрузки:', error)
+                taskList.innerHTML = '<li>Ошибка загрузки задач</li>'
+                return
+            }
+
+            if (data.length === 0) {
+                taskList.innerHTML = '<li>Нет задач</li>'
+                return
+            }
+
+            taskList.innerHTML = data.map(task => `<li>${task.title}</li>`).join('')
+        }
+
+        loadTasks()
+
+        document.getElementById('createBtn').addEventListener('click', async () => {
+            const taskInput = document.getElementById('taskInput')
+            const title = taskInput.value.trim()
+
+            if (!title) {
+                alert('Введите название задачи')
+                return
+            }
+
+            console.log('Создание задачи:', title)
+
+            const { data, error } = await supabaseClient
+                .from('tasks')
+                .insert([{ title }])
+                .select()
+
+            if (error) {
+                console.error('Ошибка при создании:', error)
+            } else {
+                console.log('Задача создана:', data)
+                taskInput.value = ''
+                loadTasks()
+            }
+        })
+    </script>
+</body>
+</html>
