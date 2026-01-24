@@ -331,6 +331,20 @@ class WildberriesParserPlaywright:
                             await asyncio.sleep(0.7)
                         print(f"📜 Прокрутка вопросов завершена", flush=True)
 
+                        # Диагностика: выводим классы элементов на странице
+                        page_classes = await page.evaluate('''() => {
+                            const classes = new Set();
+                            document.querySelectorAll('*').forEach(el => {
+                                el.classList.forEach(c => {
+                                    if (c.toLowerCase().includes('question') || c.toLowerCase().includes('qa')) {
+                                        classes.add(c);
+                                    }
+                                });
+                            });
+                            return Array.from(classes).slice(0, 30);
+                        }''')
+                        print(f"🔎 Классы с 'question/qa' на странице: {page_classes}", flush=True)
+
                         # Если API не перехватил вопросы, парсим из DOM
                         if len(collected_questions) == 0:
                             print("🔍 API вопросов не найден, парсим из DOM...", flush=True)
