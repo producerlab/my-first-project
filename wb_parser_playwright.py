@@ -330,6 +330,13 @@ class WildberriesParserPlaywright:
                             await page.evaluate('window.scrollBy(0, 800)')
                             await asyncio.sleep(0.7)
                         print(f"📜 Прокрутка вопросов завершена", flush=True)
+
+                        # Если API не перехватил вопросы, парсим из DOM
+                        if len(collected_questions) == 0:
+                            print("🔍 API вопросов не найден, парсим из DOM...", flush=True)
+                            dom_questions = await self._parse_questions_from_dom(page)
+                            collected_questions.extend(dom_questions)
+                            print(f"📝 Из DOM получено вопросов: {len(dom_questions)}", flush=True)
                     else:
                         print("ℹ️ Вкладка вопросов не найдена (возможно, у товара нет вопросов)", flush=True)
                 except Exception as e:
@@ -351,6 +358,94 @@ class WildberriesParserPlaywright:
             'reviews': collected_reviews[:self.max_reviews],
             'questions': collected_questions[:self.max_reviews]
         }
+
+    async def _parse_questions_from_dom(self, page) -> List[Dict]:
+        """Парсит вопросы напрямую из DOM страницы (fallback если API не сработал)"""
+        questions = []
+        try:
+            # Селекторы для блоков вопросов на WB (пробуем разные варианты)
+            question_block_selectors = [
+                '.questions__item',
+                '.question-item',
+                '.product-questions__item',
+                '[data-widget="QuestionItem"]',
+                '.qa-item',
+                '.qna__item'
+            ]
+
+            for selector in question_block_selectors:
+                elements = await page.query_selector_all(selector)
+                if elements and len(elements) > 0:
+                    print(f"✅ Найдены блоки вопросов по селектору: {selector} ({len(elements)} шт)", flush=True)
+
+                    for elem in elements[:self.max_reviews]:
+                        try:
+                            # Пытаемся извлечь текст вопроса
+                            q_text_el = await elem.query_selector('.question__text, .question-text, [class*="question"]')
+                            q_text = await q_text_el.inner_text() if q_text_el else ''
+
+                            # Пытаемся извлечь ответ
+                            a_text_el = await elem.query_selector('.answer__text, .answer-text, [class*="answer"]')
+                            a_text = await a_text_el.inner_text() if a_text_el else 'Нет ответа'
+
+                            # Пытаемся извлечь автора
+                            author_el = await elem.query_selector('.question__author, .author, [class*="user"]')
+                            author = await author_el.inner_text() if author_el else 'Аноним'
+
+                            # Пытаемся извлечь дату
+                            date_el = await elem.query_selector('.question__date, .date, [class*="date"]')
+                            date = await date_el.inner_text() if date_el else ''
+
+                            if q_text:
+                                questions.append({
+                                    'question': q_text.strip(),
+                                    'answer': a_text.strip() if a_text else 'Нет ответа',
+                                    'author': author.strip() if author else 'Аноним',
+                                    'date': date.strip() if date else ''
+                                })
+                        except Exception as e:
+                            print(f"⚠️ Ошибка парсинга элемента вопроса: {e}", flush=True)
+                            continue
+
+                    if questions:
+                        break  # Нашли вопросы, выходим
+
+            # Если стандартные селекторы не сработали, пробуем универсальный подход
+            if not questions:
+                print("🔄 Пробуем универсальный парсинг вопросов...", flush=True)
+                # Ищем любые элементы с текстом "вопрос" в классе
+                all_questions = await page.evaluate('''() => {
+                    const results = [];
+                    // Ищем все элементы, которые могут быть вопросами
+                    const elements = document.querySelectorAll('[class*="question"], [class*="Question"]');
+                    elements.forEach(el => {
+                        const text = el.innerText;
+                        if (text && text.length > 10 && text.length < 2000) {
+                            results.push(text);
+                        }
+                    });
+                    return results.slice(0, 100);  // Максимум 100
+                }''')
+
+                if all_questions:
+                    print(f"📝 Найдено {len(all_questions)} текстовых блоков с вопросами", flush=True)
+                    for q_text in all_questions:
+                        # Пробуем разделить на вопрос и ответ
+                        parts = q_text.split('\n')
+                        question = parts[0] if parts else q_text
+                        answer = '\n'.join(parts[1:]) if len(parts) > 1 else 'Нет ответа'
+
+                        questions.append({
+                            'question': question.strip()[:500],
+                            'answer': answer.strip()[:1000] if answer else 'Нет ответа',
+                            'author': 'Аноним',
+                            'date': ''
+                        })
+
+        except Exception as e:
+            print(f"❌ Ошибка DOM-парсинга вопросов: {e}", flush=True)
+
+        return questions
 
     def format_reviews_for_excel(self, reviews: List[Dict]) -> List[Dict]:
         """Форматирует отзывы для записи в Excel"""
