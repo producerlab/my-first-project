@@ -129,22 +129,34 @@ class WildberriesParserPlaywright:
                     try:
                         data = await response.json()
                         keys = list(data.keys()) if isinstance(data, dict) else 'not dict'
-                        logger.debug(f"Структура ответа вопросов: {keys}")
+                        logger.info(f"Структура ответа вопросов: {keys}")
+
+                        # Логируем для диагностики
+                        if isinstance(data, dict):
+                            for key in ['questions', 'data', 'feedbacks', 'items', 'result']:
+                                if key in data:
+                                    val = data[key]
+                                    if isinstance(val, list):
+                                        logger.info(f"  Ключ '{key}': список из {len(val)} элементов")
+                                    elif isinstance(val, dict):
+                                        logger.info(f"  Ключ '{key}': словарь с ключами {list(val.keys())[:5]}")
 
                         questions = None
                         if isinstance(data, dict):
                             # Проверяем различные варианты структуры WB API
-                            questions = (
-                                data.get('questions') or
-                                data.get('data', {}).get('questions') if isinstance(data.get('data'), dict) else None or
-                                data.get('feedbacks') or  # иногда WB использует feedbacks для вопросов тоже
-                                data.get('qa') or
-                                data.get('qna') or
-                                data.get('questionList') or
-                                data.get('items') or
-                                data.get('result') or
-                                []
-                            )
+                            questions = data.get('questions')
+                            if not questions and isinstance(data.get('data'), dict):
+                                questions = data['data'].get('questions')
+                            if not questions:
+                                questions = (
+                                    data.get('feedbacks') or
+                                    data.get('qa') or
+                                    data.get('qna') or
+                                    data.get('questionList') or
+                                    data.get('items') or
+                                    data.get('result') or
+                                    []
+                                )
 
                         if questions and isinstance(questions, list) and len(questions) > 0:
                             logger.info(f"Найдено {len(questions)} вопросов в API")
