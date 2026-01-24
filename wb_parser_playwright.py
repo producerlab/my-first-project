@@ -112,6 +112,11 @@ class WildberriesParserPlaywright:
                 is_question_api = any(keyword in url.lower() for keyword in question_keywords)
 
                 if is_question_api and response.status == 200:
+                    # Пропускаем статические файлы (изображения, CSS, JS)
+                    content_type = response.headers.get('content-type', '')
+                    if not content_type.startswith('application/json'):
+                        return
+
                     print(f"💬 Найден возможный API вопросов: {url[:150]}")
                     try:
                         data = await response.json()
@@ -186,6 +191,11 @@ class WildberriesParserPlaywright:
 
                 # Ищем запросы к API отзывов (любые варианты)
                 if ('/feedbacks' in url or '/feedback' in url or '/reviews' in url) and response.status == 200:
+                    # Пропускаем статические файлы
+                    content_type = response.headers.get('content-type', '')
+                    if not content_type.startswith('application/json'):
+                        return
+
                     print(f"✨ Найден API отзывов: {url[:100]}")
                     try:
                         data = await response.json()

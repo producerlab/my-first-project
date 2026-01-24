@@ -3,6 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Устанавливаем системные зависимости для Playwright
+# Добавлены дополнительные зависимости для стабильной работы на Railway
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -22,19 +23,33 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libatspi2.0-0 \
     libxshmfence1 \
+    # Дополнительные зависимости для Chromium
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxext6 \
+    libxi6 \
+    libxtst6 \
+    libglib2.0-0 \
+    fonts-liberation \
+    libnss3-tools \
+    xdg-utils \
+    wget \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем и устанавливаем зависимости Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем браузер Playwright
-RUN playwright install chromium
+# Устанавливаем браузер Playwright с зависимостями
+RUN playwright install chromium --with-deps
 
 # Копируем код
 COPY . .
 
-# Создаем папки
-RUN mkdir -p exports
+# Создаем папки для данных
+RUN mkdir -p exports data
 
+# Запуск бота
 CMD ["python", "bot.py"]
