@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: parserreview_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Сохраняем БД, логи и экспорты на хосте
+      - ./bot_data.db:/app/bot_data.db
+      - ./bot.log:/app/bot.log
+      - ./exports:/app/exports
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

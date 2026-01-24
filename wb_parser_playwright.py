@@ -1,0 +1,351 @@
+import asyncio
+import logging
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from typing import List, Dict, Optional
+import re
+from datetime import datetime
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from config import Config
+from exceptions import (
+    ParserError, NetworkError, PageLoadError,
+    TimeoutError, RateLimitError, BrowserError,
+    NoDataFoundError, APIResponseError
+)
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
+
+
+class WildberriesParserPlaywright:
+    """
+    Парсер отзывов Wildberries через Playwright с перехватом API
+
+    Этот парсер решает проблему закрытого API:
+    1. Открывает реальную страницу товара в браузере
+    2. Перехватывает API запросы к feedbacks, которые делает сам сайт WB
+    3. Извлекает отзывы из ответов API
+
+    Преимущества:
+    - Работает с актуальным API WB (какой бы он ни был)
+    - Не требует знания внутренних ID (imtId)
+    - Обходит защиту от ботов
+    """
+
+    def __init__(self, max_reviews: int = None):
+        self.max_reviews = max_reviews or Config.MAX_REVIEWS
+        logger.info(f"Инициализирован WB парсер с max_reviews={self.max_reviews}")
+
+    def extract_product_id(self, url: str) -> Optional[str]:
+        """Извлекает ID товара из URL"""
+        match = re.search(r'/catalog/(\d+)/', url)
+        if match:
+            return match.group(1)
+        return None
+
+    @retry(
+        stop=stop_after_attempt(Config.RETRY_MAX_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=1,
+            min=Config.RETRY_MIN_WAIT,
+            max=Config.RETRY_MAX_WAIT
+        ),
+        retry=retry_if_exception_type((NetworkError, TimeoutError, BrowserError)),
+        reraise=True
+    )
+    async def get_reviews(self, product_url: str, progress_callback=None) -> Dict[str, List[Dict]]:
+        """
+        Получает отзывы и вопросы перехватом API запросов с retry логикой
+
+        Args:
+            product_url: ссылка на товар
+            progress_callback: функция для обновления прогресса (current, total)
+
+        Returns:
+            Dict с ключами 'reviews' и 'questions'
+
+        Raises:
+            InvalidURLError: Если URL невалидный
+            PageLoadError: Если не удалось загрузить страницу
+            NoDataFoundError: Если не найдено отзывов
+            TimeoutError: Если превышен timeout
+            NetworkError: Если проблемы с сетью
+        """
+        logger.info(f"Начало парсинга WB: {product_url}")
+        collected_reviews = []
+        collected_questions = []
+        total_count = 0
+
+        async with async_playwright() as p:
+            # Запускаем браузер (headless из конфига)
+            try:
+                browser = await p.chromium.launch(
+                    headless=Config.PARSER_HEADLESS,
+                    args=['--disable-blink-features=AutomationControlled'],
+                    timeout=Config.PARSER_TIMEOUT
+                )
+                logger.debug(f"Браузер запущен (headless={Config.PARSER_HEADLESS})")
+            except Exception as e:
+                logger.error(f"Ошибка запуска браузера: {e}")
+                raise BrowserError(f"Не удалось запустить браузер: {str(e)}", browser_type="chromium")
+
+            # Создаем контекст с реалистичными настройками
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080},
+                locale='ru-RU'
+            )
+
+            page = await context.new_page()
+
+            # Перехватчик ответов API
+            async def handle_response(response):
+                nonlocal collected_reviews, collected_questions, total_count
+
+                url = response.url
+
+                # Логируем ВСЕ запросы для отладки
+                print(f"🔍 Запрос: {url[:100]}")
+
+                # Обрабатываем вопросы - расширенный поиск
+                question_keywords = ['/questions', '/question', '/qa', '/q&a', '/qna', '/answers']
+                is_question_api = any(keyword in url.lower() for keyword in question_keywords)
+
+                if is_question_api and response.status == 200:
+                    print(f"💬 Найден возможный API вопросов: {url[:150]}")
+                    try:
+                        data = await response.json()
+                        print(f"📦 Структура ответа: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+
+                        # Логируем полный ответ для отладки (только первый раз)
+                        if not collected_questions:
+                            import json
+                            debug_file = f"debug_wb_questions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                            with open(debug_file, 'w', encoding='utf-8') as f:
+                                json.dump({'url': url, 'data': data}, f, ensure_ascii=False, indent=2)
+                            print(f"📝 Сохранён debug файл: {debug_file}")
+
+                        questions = None
+                        if isinstance(data, dict):
+                            # Проверяем различные варианты структуры
+                            questions = (data.get('questions') or
+                                       data.get('data', {}).get('questions') if isinstance(data.get('data'), dict) else None or
+                                       data.get('qa') or
+                                       data.get('qna') or
+                                       data.get('questionList') or
+                                       data.get('items') or [])
+
+                        if questions and isinstance(questions, list) and len(questions) > 0:
+                            print(f"✅ Найдено {len(questions)} вопросов в API")
+
+                            for q_data in questions:
+                                if len(collected_questions) >= self.max_reviews:
+                                    break
+
+                                # Извлекаем текст вопроса
+                                question_text = (q_data.get('text') or
+                                               q_data.get('question') or
+                                               q_data.get('questionText') or
+                                               q_data.get('body') or '')
+
+                                # Извлекаем ответ (может быть вложенным объектом)
+                                answer_data = q_data.get('answer')
+                                if isinstance(answer_data, dict):
+                                    answer_text = answer_data.get('text') or answer_data.get('body') or 'Нет ответа'
+                                elif isinstance(answer_data, str):
+                                    answer_text = answer_data
+                                elif isinstance(answer_data, list) and len(answer_data) > 0:
+                                    # Иногда ответов может быть несколько
+                                    first_answer = answer_data[0]
+                                    answer_text = first_answer.get('text') if isinstance(first_answer, dict) else str(first_answer)
+                                else:
+                                    answer_text = 'Нет ответа'
+
+                                # Извлекаем автора
+                                user_data = q_data.get('user')
+                                if isinstance(user_data, dict):
+                                    author = user_data.get('name') or user_data.get('username') or 'Аноним'
+                                else:
+                                    author = q_data.get('userName') or q_data.get('author') or 'Аноним'
+
+                                question = {
+                                    'question': question_text,
+                                    'answer': answer_text,
+                                    'date': (q_data.get('createdDate') or
+                                           q_data.get('date') or
+                                           q_data.get('created') or ''),
+                                    'author': author
+                                }
+
+                                if question['question']:
+                                    collected_questions.append(question)
+                                    print(f"➕ Добавлен вопрос от {author}: {question_text[:30]}...")
+
+                    except Exception as e:
+                        print(f"⚠️ Ошибка парсинга API вопросов: {e}")
+
+                # Ищем запросы к API отзывов (любые варианты)
+                if ('/feedbacks' in url or '/feedback' in url or '/reviews' in url) and response.status == 200:
+                    print(f"✨ Найден API отзывов: {url[:100]}")
+                    try:
+                        data = await response.json()
+
+                        # Проверяем разные варианты структуры ответа
+                        feedbacks = None
+
+                        if isinstance(data, dict):
+                            # Вариант 1: {feedbacks: [...]}
+                            feedbacks = data.get('feedbacks')
+
+                            # Вариант 2: {data: {feedbacks: [...]}}
+                            if not feedbacks and 'data' in data:
+                                feedbacks = data['data'].get('feedbacks')
+
+                            # Вариант 3: {reviews: [...]}
+                            if not feedbacks:
+                                feedbacks = data.get('reviews') or data.get('comments')
+
+                            # Получаем общее количество
+                            if not total_count:
+                                total_count = (data.get('feedbackCount') or
+                                             data.get('totalCount') or
+                                             data.get('total') or 0)
+
+                        if feedbacks and isinstance(feedbacks, list) and len(feedbacks) > 0:
+                            print(f"✅ Найдено {len(feedbacks)} отзывов в API: {url[:80]}...")
+
+                            for feedback in feedbacks:
+                                if len(collected_reviews) >= self.max_reviews:
+                                    break
+
+                                # Адаптивное извлечение данных
+                                review = {
+                                    'text': (feedback.get('text') or
+                                           feedback.get('comment') or
+                                           feedback.get('message') or ''),
+                                    'rating': (feedback.get('productValuation') or
+                                             feedback.get('rating') or
+                                             feedback.get('rate') or 0),
+                                    'date': (feedback.get('createdDate') or
+                                           feedback.get('date') or
+                                           feedback.get('created_at') or ''),
+                                    'author': (feedback.get('wbUserDetails', {}).get('name') or
+                                             feedback.get('author') or
+                                             feedback.get('userName') or
+                                             feedback.get('user') or 'Аноним'),
+                                    'pros': feedback.get('pros') or feedback.get('advantages') or '',
+                                    'cons': feedback.get('cons') or feedback.get('disadvantages') or ''
+                                }
+
+                                # Добавляем только если есть хоть какой-то текст
+                                if review['text'] or review['pros'] or review['cons']:
+                                    collected_reviews.append(review)
+
+                            # Обновляем прогресс
+                            if progress_callback:
+                                await progress_callback(len(collected_reviews),
+                                                       min(total_count or self.max_reviews, self.max_reviews))
+
+                    except Exception as e:
+                        # Не JSON или ошибка парсинга
+                        print(f"⚠️ Ошибка парсинга API отзывов: {e}")
+
+            # Подключаем перехватчик
+            page.on('response', handle_response)
+
+            try:
+                print(f"🌐 Открываем страницу WB: {product_url}")
+
+                # Открываем страницу и ждем загрузки сети
+                await page.goto(product_url, wait_until='networkidle', timeout=30000)
+
+                # Ждем еще немного для подгрузки отзывов
+                await asyncio.sleep(2)
+
+                # Пробуем прокрутить для загрузки большего количества отзывов
+                # (если используется lazy loading)
+                for i in range(5):
+                    await page.evaluate('window.scrollBy(0, 1000)')
+                    await asyncio.sleep(0.5)
+
+                # Ищем и кликаем на вкладку "Вопросы"
+                try:
+                    print("💬 Пытаемся открыть вкладку с вопросами...")
+
+                    # Пробуем разные варианты селекторов для вкладки вопросов
+                    question_selectors = [
+                        'text=Вопросы',
+                        'text=Вопрос',
+                        'text=Вопросы и ответы',
+                        'text=Q&A',
+                        '[data-link="questions"]',
+                        'a:has-text("Вопрос")',
+                        'button:has-text("Вопрос")'
+                    ]
+
+                    clicked = False
+                    for selector in question_selectors:
+                        try:
+                            await page.click(selector, timeout=2000)
+                            print(f"✅ Открыта вкладка вопросов через селектор: {selector}")
+                            clicked = True
+                            break
+                        except:
+                            continue
+
+                    if clicked:
+                        await asyncio.sleep(2)
+                        # Прокручиваем вопросы
+                        for i in range(3):
+                            await page.evaluate('window.scrollBy(0, 1000)')
+                            await asyncio.sleep(0.5)
+                    else:
+                        print("ℹ️ Вкладка вопросов не найдена (возможно, её нет на странице)")
+                except Exception as e:
+                    print(f"⚠️ Ошибка при работе с вкладкой вопросов: {e}")
+
+                # Финальная пауза
+                await asyncio.sleep(1)
+
+                print(f"📊 Собрано отзывов: {len(collected_reviews)}")
+                print(f"💬 Собрано вопросов: {len(collected_questions)}")
+
+            except Exception as e:
+                print(f"❌ Ошибка загрузки страницы: {e}")
+
+            finally:
+                await browser.close()
+
+        return {
+            'reviews': collected_reviews[:self.max_reviews],
+            'questions': collected_questions[:self.max_reviews]
+        }
+
+    def format_reviews_for_excel(self, reviews: List[Dict]) -> List[Dict]:
+        """Форматирует отзывы для записи в Excel"""
+        formatted = []
+        for review in reviews:
+            formatted.append({
+                'Автор': review['author'],
+                'Рейтинг': review['rating'],
+                'Дата': review['date'][:10] if review['date'] else '',
+                'Текст отзыва': review['text'],
+                'Плюсы': review['pros'],
+                'Минусы': review['cons']
+            })
+        return formatted
+
+    def format_questions_for_excel(self, questions: List[Dict]) -> List[Dict]:
+        """Форматирует вопросы для записи в Excel в формате отзывов"""
+        formatted = []
+        for q in questions:
+            # Приводим к формату отзывов для совместимости с export_reviews
+            formatted.append({
+                'Автор': q.get('author', 'Аноним'),
+                'Рейтинг': 0,  # У вопросов нет рейтинга
+                'Дата': q.get('date', '')[:10] if q.get('date') else '',
+                'Текст отзыва': f"❓ {q.get('question', '')}\n\n💬 {q.get('answer', 'Нет ответа')}",
+                'Плюсы': '',
+                'Минусы': ''
+            })
+        return formatted
