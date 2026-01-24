@@ -208,15 +208,30 @@ class WildberriesParserPlaywright:
                         logger.warning(f"Ошибка парсинга API вопросов: {e}")
 
                 # Ищем запросы к API отзывов (любые варианты)
-                if ('/feedbacks' in url or '/feedback' in url or '/reviews' in url) and response.status == 200:
+                feedback_keywords = ['/feedbacks', '/feedback', '/reviews', '/comments', 'feedbacks-api']
+                is_feedback_api = any(keyword in url.lower() for keyword in feedback_keywords)
+
+                if is_feedback_api and response.status == 200:
                     # Пропускаем статические файлы
                     content_type = response.headers.get('content-type', '')
                     if not content_type.startswith('application/json'):
                         return
 
-                    logger.info(f"Найден API отзывов: {url[:100]}")
+                    logger.info(f"Найден API отзывов: {url[:150]}")
                     try:
                         data = await response.json()
+                        keys = list(data.keys()) if isinstance(data, dict) else 'not dict'
+                        logger.info(f"Структура ответа отзывов: {keys}")
+
+                        # Логируем для диагностики
+                        if isinstance(data, dict):
+                            for key in ['feedbacks', 'data', 'reviews', 'comments', 'items', 'result']:
+                                if key in data:
+                                    val = data[key]
+                                    if isinstance(val, list):
+                                        logger.info(f"  Ключ '{key}': список из {len(val)} элементов")
+                                    elif isinstance(val, dict):
+                                        logger.info(f"  Ключ '{key}': словарь с ключами {list(val.keys())[:5]}")
 
                         # Проверяем разные варианты структуры ответа
                         feedbacks = None
@@ -226,18 +241,25 @@ class WildberriesParserPlaywright:
                             feedbacks = data.get('feedbacks')
 
                             # Вариант 2: {data: {feedbacks: [...]}}
-                            if not feedbacks and 'data' in data:
+                            if not feedbacks and 'data' in data and isinstance(data['data'], dict):
                                 feedbacks = data['data'].get('feedbacks')
 
-                            # Вариант 3: {reviews: [...]}
+                            # Вариант 3: {reviews: [...]} или другие варианты
                             if not feedbacks:
-                                feedbacks = data.get('reviews') or data.get('comments')
+                                feedbacks = (
+                                    data.get('reviews') or
+                                    data.get('comments') or
+                                    data.get('items') or
+                                    data.get('result')
+                                )
 
                             # Получаем общее количество
                             if not total_count:
                                 total_count = (data.get('feedbackCount') or
+                                             data.get('feedbackCountWithText') or
                                              data.get('totalCount') or
-                                             data.get('total') or 0)
+                                             data.get('total') or
+                                             data.get('count') or 0)
 
                         if feedbacks and isinstance(feedbacks, list) and len(feedbacks) > 0:
                             logger.info(f"Найдено {len(feedbacks)} отзывов в API")
@@ -290,19 +312,31 @@ class WildberriesParserPlaywright:
                 # Ждем еще немного для подгрузки отзывов
                 await asyncio.sleep(2)
 
-                # Пробуем прокрутить для загрузки большего количества отзывов
-                # (если используется lazy loading)
-                for i in range(5):
-                    await page.evaluate('window.scrollBy(0, 1000)')
-                    await asyncio.sleep(0.5)
+                # Извлекаем артикул из URL
+                product_id = self.extract_product_id(product_url)
+
+                # Переходим на страницу отзывов напрямую по URL
+                if product_id:
+                    try:
+                        logger.info("Переходим на страницу отзывов...")
+                        feedbacks_url = f"https://www.wildberries.ru/catalog/{product_id}/feedbacks"
+                        logger.debug(f"URL отзывов: {feedbacks_url}")
+
+                        await page.goto(feedbacks_url, wait_until='networkidle', timeout=30000)
+                        await asyncio.sleep(2)
+
+                        # Прокручиваем для загрузки всех отзывов
+                        for i in range(5):
+                            await page.evaluate('window.scrollBy(0, 1000)')
+                            await asyncio.sleep(0.7)
+                        logger.debug("Прокрутка страницы отзывов завершена")
+                    except Exception as e:
+                        logger.warning(f"Ошибка при загрузке страницы отзывов: {e}")
 
                 # Переходим на страницу вопросов напрямую по URL
-                try:
-                    logger.info("Переходим на страницу вопросов...")
-
-                    # Извлекаем артикул из URL и строим URL страницы вопросов
-                    product_id = self.extract_product_id(product_url)
-                    if product_id:
+                if product_id:
+                    try:
+                        logger.info("Переходим на страницу вопросов...")
                         questions_url = f"https://www.wildberries.ru/catalog/{product_id}/questions"
                         logger.debug(f"URL вопросов: {questions_url}")
 
@@ -322,10 +356,10 @@ class WildberriesParserPlaywright:
                             dom_questions = await self._parse_questions_from_dom(page)
                             collected_questions.extend(dom_questions)
                             logger.info(f"Из DOM получено вопросов: {len(dom_questions)}")
-                    else:
-                        logger.warning("Не удалось извлечь артикул товара из URL")
-                except Exception as e:
-                    logger.warning(f"Ошибка при загрузке страницы вопросов: {e}")
+                    except Exception as e:
+                        logger.warning(f"Ошибка при загрузке страницы вопросов: {e}")
+                else:
+                    logger.warning("Не удалось извлечь артикул товара из URL")
 
                 # Финальная пауза
                 await asyncio.sleep(1)
