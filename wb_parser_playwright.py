@@ -283,57 +283,25 @@ class WildberriesParserPlaywright:
                     await page.evaluate('window.scrollBy(0, 1000)')
                     await asyncio.sleep(0.5)
 
-                # Ищем и кликаем на вкладку "Вопросы"
+                # Переходим на страницу вопросов напрямую по URL
                 try:
-                    print("💬 Пытаемся открыть вкладку с вопросами...", flush=True)
+                    print("💬 Переходим на страницу вопросов...", flush=True)
 
-                    # Актуальные селекторы для WB (2026)
-                    question_selectors = [
-                        # По тексту
-                        'text="Вопросы"',
-                        'text="Вопросы о товаре"',
-                        ':text("Вопрос")',
-                        # По атрибутам data-*
-                        '[data-link="questions"]',
-                        '[data-tab="questions"]',
-                        '[data-widget="Questions"]',
-                        '[data-testid="questions-tab"]',
-                        # По классам (общие паттерны WB)
-                        '.product-page__tab:has-text("Вопрос")',
-                        '.tabs__item:has-text("Вопрос")',
-                        '.tab:has-text("Вопрос")',
-                        # Ссылки и кнопки
-                        'a:has-text("Вопросы")',
-                        'button:has-text("Вопросы")',
-                        'span:has-text("Вопросы")',
-                        # Fallback - любой кликабельный элемент с текстом
-                        '[role="tab"]:has-text("Вопрос")'
-                    ]
+                    # Извлекаем артикул из URL и строим URL страницы вопросов
+                    product_id = self.extract_product_id(product_url)
+                    if product_id:
+                        questions_url = f"https://www.wildberries.ru/catalog/{product_id}/questions"
+                        print(f"🔗 URL вопросов: {questions_url}", flush=True)
 
-                    clicked = False
-                    for selector in question_selectors:
-                        try:
-                            element = await page.wait_for_selector(selector, timeout=1500, state='visible')
-                            if element:
-                                await element.click()
-                                print(f"✅ Открыта вкладка вопросов через селектор: {selector}", flush=True)
-                                clicked = True
-                                break
-                        except:
-                            continue
+                        # Открываем страницу вопросов
+                        await page.goto(questions_url, wait_until='networkidle', timeout=30000)
+                        await asyncio.sleep(2)
 
-                    if clicked:
-                        # Ждём загрузки вопросов
-                        await asyncio.sleep(3)
                         # Прокручиваем для загрузки всех вопросов
                         for i in range(5):
-                            await page.evaluate('window.scrollBy(0, 800)')
+                            await page.evaluate('window.scrollBy(0, 1000)')
                             await asyncio.sleep(0.7)
-                        print(f"📜 Прокрутка вопросов завершена", flush=True)
-
-                        # Получаем текущий URL (может измениться после клика на вкладку)
-                        current_url = page.url
-                        print(f"🔗 URL после клика на вопросы: {current_url}", flush=True)
+                        print(f"📜 Прокрутка страницы вопросов завершена", flush=True)
 
                         # Если API не перехватил вопросы, парсим из DOM
                         if len(collected_questions) == 0:
@@ -342,9 +310,9 @@ class WildberriesParserPlaywright:
                             collected_questions.extend(dom_questions)
                             print(f"📝 Из DOM получено вопросов: {len(dom_questions)}", flush=True)
                     else:
-                        print("ℹ️ Вкладка вопросов не найдена (возможно, у товара нет вопросов)", flush=True)
+                        print("⚠️ Не удалось извлечь артикул товара из URL", flush=True)
                 except Exception as e:
-                    print(f"⚠️ Ошибка при работе с вкладкой вопросов: {e}", flush=True)
+                    print(f"⚠️ Ошибка при загрузке страницы вопросов: {e}", flush=True)
 
                 # Финальная пауза
                 await asyncio.sleep(1)
