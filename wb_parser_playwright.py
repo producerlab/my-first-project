@@ -331,49 +331,9 @@ class WildberriesParserPlaywright:
                             await asyncio.sleep(0.7)
                         print(f"📜 Прокрутка вопросов завершена", flush=True)
 
-                        # Диагностика: выводим классы и структуру страницы
-                        diagnostics = await page.evaluate('''() => {
-                            const result = {
-                                questionClasses: [],
-                                allMainClasses: [],
-                                visibleTexts: []
-                            };
-
-                            // Ищем классы с question/qa
-                            document.querySelectorAll('*').forEach(el => {
-                                el.classList.forEach(c => {
-                                    if (c.toLowerCase().includes('question') || c.toLowerCase().includes('qa')) {
-                                        if (!result.questionClasses.includes(c)) {
-                                            result.questionClasses.push(c);
-                                        }
-                                    }
-                                });
-                            });
-
-                            // Ищем основные контейнеры (первые 20 уникальных классов блочных элементов)
-                            document.querySelectorAll('div, section, article, ul, li').forEach(el => {
-                                if (el.classList.length > 0 && result.allMainClasses.length < 30) {
-                                    const cls = el.classList[0];
-                                    if (cls && !result.allMainClasses.includes(cls) && cls.length < 50) {
-                                        result.allMainClasses.push(cls);
-                                    }
-                                }
-                            });
-
-                            // Собираем видимые текстовые блоки (возможные вопросы)
-                            document.querySelectorAll('div, p, span, li').forEach(el => {
-                                const text = el.innerText?.trim();
-                                if (text && text.length > 30 && text.length < 500 &&
-                                    text.includes('?') && result.visibleTexts.length < 10) {
-                                    result.visibleTexts.push(text.substring(0, 100));
-                                }
-                            });
-
-                            return result;
-                        }''')
-                        print(f"🔎 Классы question/qa: {diagnostics.get('questionClasses', [])[:15]}", flush=True)
-                        print(f"🔎 Основные классы: {diagnostics.get('allMainClasses', [])[:15]}", flush=True)
-                        print(f"🔎 Тексты с '?': {diagnostics.get('visibleTexts', [])[:5]}", flush=True)
+                        # Получаем текущий URL (может измениться после клика на вкладку)
+                        current_url = page.url
+                        print(f"🔗 URL после клика на вопросы: {current_url}", flush=True)
 
                         # Если API не перехватил вопросы, парсим из DOM
                         if len(collected_questions) == 0:
@@ -404,167 +364,105 @@ class WildberriesParserPlaywright:
         }
 
     async def _parse_questions_from_dom(self, page) -> List[Dict]:
-        """Парсит вопросы напрямую из DOM страницы (fallback если API не сработал)"""
+        """Парсит вопросы напрямую из DOM страницы"""
         questions = []
         try:
-            # Сначала пробуем найти структурированные блоки вопросов через JS
-            print("🔍 Ищем структурированные блоки вопросов...", flush=True)
+            print("🔍 Парсим все содержимое страницы вопросов...", flush=True)
 
-            structured_questions = await page.evaluate('''() => {
+            # Собираем ВСЕ текстовые блоки на странице, которые могут быть вопросами
+            # Ищем повторяющиеся структуры (карточки вопросов)
+            page_content = await page.evaluate('''() => {
                 const results = [];
+                const seen = new Set();
 
-                // Способ 1: Ищем все элементы списка вопросов на странице
-                // WB обычно использует список с классами содержащими "question" или "qa"
-                const containers = document.querySelectorAll(
-                    '[class*="questions-list"], [class*="questionsList"], [class*="qa-list"], ' +
-                    '[class*="Questions__list"], [class*="question-list"]'
-                );
+                // Функция для проверки, является ли текст "мусором"
+                const isJunk = (text) => {
+                    if (!text || text.length < 10 || text.length > 3000) return true;
+                    // Исключаем навигацию, кнопки, счётчики
+                    const junkPatterns = [
+                        /^\\d+\\s*(вопрос|отзыв|товар)/i,
+                        /^(вопрос|отзыв|показать|загрузить|ещё|далее|назад)/i,
+                        /^(главная|каталог|корзина|избранное|профиль)/i,
+                        /^\\d+$/,
+                        /^(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)$/i
+                    ];
+                    return junkPatterns.some(p => p.test(text.trim()));
+                };
 
-                containers.forEach(container => {
-                    // Внутри контейнера ищем отдельные элементы вопросов
-                    const items = container.querySelectorAll('[class*="item"], li, article, > div');
-                    items.forEach(item => {
-                        const text = item.innerText.trim();
-                        if (text.length > 30 && text.length < 3000) {
-                            results.push({
-                                fullText: text,
-                                html: item.innerHTML.substring(0, 500)
-                            });
+                // Способ 1: Ищем все li элементы (списки вопросов)
+                document.querySelectorAll('ul > li, ol > li').forEach(li => {
+                    const text = li.innerText?.trim();
+                    if (text && !isJunk(text) && text.length > 20) {
+                        const key = text.substring(0, 100);
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            results.push({ text, tag: 'li' });
                         }
-                    });
+                    }
                 });
 
-                // Способ 2: Если не нашли контейнер, ищем отдельные блоки вопросов
-                if (results.length === 0) {
-                    const questionItems = document.querySelectorAll(
-                        '[class*="question__item"], [class*="questionItem"], [class*="qa__item"], ' +
-                        '[class*="Question__item"], [class*="questions__item"]'
-                    );
-                    questionItems.forEach(item => {
-                        const text = item.innerText.trim();
-                        if (text.length > 30 && text.length < 3000) {
-                            results.push({
-                                fullText: text,
-                                html: item.innerHTML.substring(0, 500)
-                            });
+                // Способ 2: Ищем article элементы
+                document.querySelectorAll('article').forEach(article => {
+                    const text = article.innerText?.trim();
+                    if (text && !isJunk(text) && text.length > 20) {
+                        const key = text.substring(0, 100);
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            results.push({ text, tag: 'article' });
                         }
-                    });
-                }
+                    }
+                });
 
-                return results.slice(0, 100);
+                // Способ 3: Ищем div с классами содержащими item, card, block
+                document.querySelectorAll('[class*="item"], [class*="card"], [class*="block"]').forEach(el => {
+                    // Пропускаем если это контейнер с множеством дочерних элементов того же типа
+                    if (el.querySelectorAll('[class*="item"], [class*="card"]').length > 2) return;
+
+                    const text = el.innerText?.trim();
+                    if (text && !isJunk(text) && text.length > 30 && text.length < 1500) {
+                        const key = text.substring(0, 100);
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            results.push({ text, tag: el.className.split(' ')[0] || 'div' });
+                        }
+                    }
+                });
+
+                return results.slice(0, 200);
             }''')
 
-            if structured_questions and len(structured_questions) > 0:
-                print(f"✅ Найдено {len(structured_questions)} структурированных блоков", flush=True)
+            print(f"📦 Найдено {len(page_content)} текстовых блоков на странице", flush=True)
 
-                for item in structured_questions:
-                    full_text = item.get('fullText', '')
-                    lines = [l.strip() for l in full_text.split('\n') if l.strip()]
+            if page_content:
+                # Выводим первые 3 для диагностики
+                for i, item in enumerate(page_content[:3]):
+                    text_preview = item.get('text', '')[:80].replace('\n', ' ')
+                    print(f"  [{i+1}] ({item.get('tag')}): {text_preview}...", flush=True)
 
-                    if lines:
-                        # Первая непустая строка - вопрос
+                # Обрабатываем найденные блоки
+                for item in page_content:
+                    text = item.get('text', '')
+                    lines = [l.strip() for l in text.split('\n') if l.strip() and len(l.strip()) > 3]
+
+                    if len(lines) >= 1:
+                        # Первая строка - вопрос, остальное - ответ
                         question_text = lines[0]
-                        # Остальное - ответ
-                        answer_text = '\n'.join(lines[1:]) if len(lines) > 1 else 'Нет ответа'
 
-                        # Фильтруем счётчики типа "29 вопросов"
-                        if len(question_text) > 20 and not any(x in question_text.lower() for x in ['вопросов', 'вопроса', 'questions']):
-                            questions.append({
-                                'question': question_text[:500],
-                                'answer': answer_text[:1000] if answer_text else 'Нет ответа',
-                                'author': 'Аноним',
-                                'date': ''
-                            })
-
-                if questions:
-                    return questions
-
-            # Fallback: старый метод с CSS селекторами
-            question_block_selectors = [
-                '.questions__item',
-                '.question-item',
-                '.product-questions__item',
-                '[data-widget="QuestionItem"]',
-                '.qa-item',
-                '.qna__item'
-            ]
-
-            for selector in question_block_selectors:
-                elements = await page.query_selector_all(selector)
-                if elements and len(elements) > 0:
-                    print(f"✅ Найдены блоки вопросов по селектору: {selector} ({len(elements)} шт)", flush=True)
-
-                    for elem in elements[:self.max_reviews]:
-                        try:
-                            # Получаем весь текст элемента
-                            full_text = await elem.inner_text()
-                            lines = [l.strip() for l in full_text.split('\n') if l.strip()]
-
-                            if lines and len(lines[0]) > 20:
-                                questions.append({
-                                    'question': lines[0][:500],
-                                    'answer': '\n'.join(lines[1:])[:1000] if len(lines) > 1 else 'Нет ответа',
-                                    'author': 'Аноним',
-                                    'date': ''
-                                })
-                        except Exception as e:
-                            print(f"⚠️ Ошибка парсинга элемента вопроса: {e}", flush=True)
+                        # Пропускаем если это явно не вопрос
+                        skip_words = ['вопросов', 'вопроса', 'отзывов', 'отзыва', 'товаров', 'рубл', '₽', 'корзин']
+                        if any(w in question_text.lower() for w in skip_words) and len(question_text) < 50:
                             continue
 
-                    if questions:
-                        break
+                        answer_text = '\n'.join(lines[1:]) if len(lines) > 1 else 'Нет ответа'
 
-            # Если стандартные селекторы не сработали, пробуем универсальный подход
-            if not questions:
-                print("🔄 Пробуем универсальный парсинг вопросов...", flush=True)
+                        questions.append({
+                            'question': question_text[:500],
+                            'answer': answer_text[:1000] if answer_text else 'Нет ответа',
+                            'author': 'Аноним',
+                            'date': ''
+                        })
 
-                # Ищем тексты с вопросительным знаком - это наверняка вопросы
-                all_questions = await page.evaluate('''() => {
-                    const results = [];
-                    const seen = new Set();
-
-                    // Ищем все элементы с текстом содержащим "?"
-                    document.querySelectorAll('div, p, span, li, article').forEach(el => {
-                        const text = el.innerText?.trim();
-
-                        // Текст должен содержать "?" и быть достаточно длинным
-                        if (text && text.includes('?') && text.length > 15 && text.length < 2000) {
-                            // Исключаем счётчики и навигацию
-                            const isCounter = /^\d+\s*(вопрос|question)/i.test(text) ||
-                                             /^вопрос/i.test(text) && text.length < 50;
-
-                            if (!isCounter) {
-                                // Берём уникальные тексты
-                                const key = text.substring(0, 80);
-                                if (!seen.has(key)) {
-                                    seen.add(key);
-                                    results.push(text);
-                                }
-                            }
-                        }
-                    });
-
-                    return results.slice(0, 100);
-                }''')
-
-                if all_questions:
-                    print(f"📝 Найдено {len(all_questions)} текстовых блоков с вопросами", flush=True)
-                    for q_text in all_questions:
-                        # Пробуем разделить на вопрос и ответ
-                        parts = q_text.split('\n')
-                        # Фильтруем пустые строки
-                        parts = [p.strip() for p in parts if p.strip()]
-
-                        if parts:
-                            question = parts[0]
-                            answer = '\n'.join(parts[1:]) if len(parts) > 1 else 'Нет ответа'
-
-                            questions.append({
-                                'question': question.strip()[:500],
-                                'answer': answer.strip()[:1000] if answer else 'Нет ответа',
-                                'author': 'Аноним',
-                                'date': ''
-                            })
+            print(f"✅ Отфильтровано вопросов: {len(questions)}", flush=True)
 
         except Exception as e:
             print(f"❌ Ошибка DOM-парсинга вопросов: {e}", flush=True)
