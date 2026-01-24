@@ -363,7 +363,79 @@ class WildberriesParserPlaywright:
         """Парсит вопросы напрямую из DOM страницы (fallback если API не сработал)"""
         questions = []
         try:
-            # Селекторы для блоков вопросов на WB (пробуем разные варианты)
+            # Сначала пробуем найти структурированные блоки вопросов через JS
+            print("🔍 Ищем структурированные блоки вопросов...", flush=True)
+
+            structured_questions = await page.evaluate('''() => {
+                const results = [];
+
+                // Способ 1: Ищем все элементы списка вопросов на странице
+                // WB обычно использует список с классами содержащими "question" или "qa"
+                const containers = document.querySelectorAll(
+                    '[class*="questions-list"], [class*="questionsList"], [class*="qa-list"], ' +
+                    '[class*="Questions__list"], [class*="question-list"]'
+                );
+
+                containers.forEach(container => {
+                    // Внутри контейнера ищем отдельные элементы вопросов
+                    const items = container.querySelectorAll('[class*="item"], li, article, > div');
+                    items.forEach(item => {
+                        const text = item.innerText.trim();
+                        if (text.length > 30 && text.length < 3000) {
+                            results.push({
+                                fullText: text,
+                                html: item.innerHTML.substring(0, 500)
+                            });
+                        }
+                    });
+                });
+
+                // Способ 2: Если не нашли контейнер, ищем отдельные блоки вопросов
+                if (results.length === 0) {
+                    const questionItems = document.querySelectorAll(
+                        '[class*="question__item"], [class*="questionItem"], [class*="qa__item"], ' +
+                        '[class*="Question__item"], [class*="questions__item"]'
+                    );
+                    questionItems.forEach(item => {
+                        const text = item.innerText.trim();
+                        if (text.length > 30 && text.length < 3000) {
+                            results.push({
+                                fullText: text,
+                                html: item.innerHTML.substring(0, 500)
+                            });
+                        }
+                    });
+                }
+
+                return results.slice(0, 100);
+            }''')
+
+            if structured_questions and len(structured_questions) > 0:
+                print(f"✅ Найдено {len(structured_questions)} структурированных блоков", flush=True)
+
+                for item in structured_questions:
+                    full_text = item.get('fullText', '')
+                    lines = [l.strip() for l in full_text.split('\n') if l.strip()]
+
+                    if lines:
+                        # Первая непустая строка - вопрос
+                        question_text = lines[0]
+                        # Остальное - ответ
+                        answer_text = '\n'.join(lines[1:]) if len(lines) > 1 else 'Нет ответа'
+
+                        # Фильтруем счётчики типа "29 вопросов"
+                        if len(question_text) > 20 and not any(x in question_text.lower() for x in ['вопросов', 'вопроса', 'questions']):
+                            questions.append({
+                                'question': question_text[:500],
+                                'answer': answer_text[:1000] if answer_text else 'Нет ответа',
+                                'author': 'Аноним',
+                                'date': ''
+                            })
+
+                if questions:
+                    return questions
+
+            # Fallback: старый метод с CSS селекторами
             question_block_selectors = [
                 '.questions__item',
                 '.question-item',
@@ -380,51 +452,54 @@ class WildberriesParserPlaywright:
 
                     for elem in elements[:self.max_reviews]:
                         try:
-                            # Пытаемся извлечь текст вопроса
-                            q_text_el = await elem.query_selector('.question__text, .question-text, [class*="question"]')
-                            q_text = await q_text_el.inner_text() if q_text_el else ''
+                            # Получаем весь текст элемента
+                            full_text = await elem.inner_text()
+                            lines = [l.strip() for l in full_text.split('\n') if l.strip()]
 
-                            # Пытаемся извлечь ответ
-                            a_text_el = await elem.query_selector('.answer__text, .answer-text, [class*="answer"]')
-                            a_text = await a_text_el.inner_text() if a_text_el else 'Нет ответа'
-
-                            # Пытаемся извлечь автора
-                            author_el = await elem.query_selector('.question__author, .author, [class*="user"]')
-                            author = await author_el.inner_text() if author_el else 'Аноним'
-
-                            # Пытаемся извлечь дату
-                            date_el = await elem.query_selector('.question__date, .date, [class*="date"]')
-                            date = await date_el.inner_text() if date_el else ''
-
-                            if q_text:
+                            if lines and len(lines[0]) > 20:
                                 questions.append({
-                                    'question': q_text.strip(),
-                                    'answer': a_text.strip() if a_text else 'Нет ответа',
-                                    'author': author.strip() if author else 'Аноним',
-                                    'date': date.strip() if date else ''
+                                    'question': lines[0][:500],
+                                    'answer': '\n'.join(lines[1:])[:1000] if len(lines) > 1 else 'Нет ответа',
+                                    'author': 'Аноним',
+                                    'date': ''
                                 })
                         except Exception as e:
                             print(f"⚠️ Ошибка парсинга элемента вопроса: {e}", flush=True)
                             continue
 
                     if questions:
-                        break  # Нашли вопросы, выходим
+                        break
 
             # Если стандартные селекторы не сработали, пробуем универсальный подход
             if not questions:
                 print("🔄 Пробуем универсальный парсинг вопросов...", flush=True)
-                # Ищем любые элементы с текстом "вопрос" в классе
+
+                # Парсим структуру вопросов на WB - ищем блоки с вопросами и ответами
                 all_questions = await page.evaluate('''() => {
                     const results = [];
-                    // Ищем все элементы, которые могут быть вопросами
-                    const elements = document.querySelectorAll('[class*="question"], [class*="Question"]');
-                    elements.forEach(el => {
-                        const text = el.innerText;
-                        if (text && text.length > 10 && text.length < 2000) {
-                            results.push(text);
+
+                    // Ищем все блоки, которые содержат вопросы (исключаем счётчики и кнопки)
+                    const questionBlocks = document.querySelectorAll(
+                        '[class*="question"]:not(button):not([class*="count"]):not([class*="tab"]):not([class*="btn"])'
+                    );
+
+                    questionBlocks.forEach(el => {
+                        const text = el.innerText.trim();
+                        // Фильтруем: текст должен быть достаточно длинным и НЕ быть счётчиком
+                        // Исключаем тексты типа "29 вопросов", "Вопросы (10)" и т.д.
+                        const isCounter = /^\d+\s*(вопрос|question)/i.test(text) ||
+                                         /^(вопрос|question).*\d+$/i.test(text) ||
+                                         text.length < 20;
+
+                        if (text && !isCounter && text.length > 20 && text.length < 3000) {
+                            // Проверяем, не добавили ли мы уже этот текст
+                            if (!results.some(r => r.includes(text.substring(0, 50)))) {
+                                results.push(text);
+                            }
                         }
                     });
-                    return results.slice(0, 100);  // Максимум 100
+
+                    return results.slice(0, 100);
                 }''')
 
                 if all_questions:
@@ -432,15 +507,19 @@ class WildberriesParserPlaywright:
                     for q_text in all_questions:
                         # Пробуем разделить на вопрос и ответ
                         parts = q_text.split('\n')
-                        question = parts[0] if parts else q_text
-                        answer = '\n'.join(parts[1:]) if len(parts) > 1 else 'Нет ответа'
+                        # Фильтруем пустые строки
+                        parts = [p.strip() for p in parts if p.strip()]
 
-                        questions.append({
-                            'question': question.strip()[:500],
-                            'answer': answer.strip()[:1000] if answer else 'Нет ответа',
-                            'author': 'Аноним',
-                            'date': ''
-                        })
+                        if parts:
+                            question = parts[0]
+                            answer = '\n'.join(parts[1:]) if len(parts) > 1 else 'Нет ответа'
+
+                            questions.append({
+                                'question': question.strip()[:500],
+                                'answer': answer.strip()[:1000] if answer else 'Нет ответа',
+                                'author': 'Аноним',
+                                'date': ''
+                            })
 
         except Exception as e:
             print(f"❌ Ошибка DOM-парсинга вопросов: {e}", flush=True)
