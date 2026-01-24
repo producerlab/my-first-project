@@ -1,7 +1,6 @@
 import asyncio
 import os
 import logging
-import sqlite3
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
@@ -12,7 +11,9 @@ from dotenv import load_dotenv
 
 from wb_parser_playwright import WildberriesParserPlaywright
 from excel_exporter import ExcelExporter
-from database import Database
+from config import Config
+from url_validator import URLValidator
+from exceptions import InvalidURLError
 
 
 # Настройка логирования с ротацией (макс 10MB, 5 бэкапов)
@@ -45,20 +46,25 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Инициализация парсера, экспортера и БД
-wb_parser = WildberriesParserPlaywright(max_reviews=1000)
+# Инициализация парсера и экспортера
+wb_parser = WildberriesParserPlaywright(max_reviews=Config.MAX_REVIEWS)
 excel_exporter = ExcelExporter()
-db = Database()
 
-# Настройки лимитов
-RATE_LIMIT_REQUESTS = 5  # запросов
-RATE_LIMIT_HOURS = 1  # за час
+# Выбор базы данных: Supabase (если настроен) или SQLite
+if Config.use_supabase():
+    from supabase_database import SupabaseDatabase
+    db = SupabaseDatabase()
+    logger.info("Используется Supabase база данных")
+else:
+    from database import Database
+    db = Database()
+    logger.info("Используется локальная SQLite база данных")
 
-# Настройки канала
-REQUIRED_CHANNEL = "@khosnullin_channel"
-
-# ID администраторов (замените на ваши реальные ID)
-ADMIN_IDS = [6716818375]  # Добавьте сюда ID администраторов
+# Настройки из Config (загружаются из .env)
+RATE_LIMIT_REQUESTS = Config.RATE_LIMIT_REQUESTS
+RATE_LIMIT_HOURS = Config.RATE_LIMIT_HOURS
+REQUIRED_CHANNEL = Config.REQUIRED_CHANNEL
+ADMIN_IDS = Config.ADMIN_IDS
 
 # Словарь для отслеживания активных задач парсинга
 active_tasks = {}
@@ -251,13 +257,30 @@ async def handle_url(message: Message):
 
     logger.info(f"Пользователь {user_id} ({username}) отправил URL: {url}")
 
-    # Проверяем, что это ссылка
-    if not url.startswith('http'):
+    # Валидация URL через URLValidator
+    try:
+        sanitized_url = URLValidator.sanitize_url(url)
+        marketplace_code, product_id = URLValidator.validate_url(sanitized_url)
+        url = sanitized_url  # Используем очищенный URL
+    except InvalidURLError as e:
+        logger.warning(f"Невалидный URL от {user_id}: {e}")
         await message.answer(
-            "❌ Пожалуйста, отправьте корректную ссылку на товар.\n\n"
+            f"❌ {e.reason}\n\n"
             "Используйте /help для получения инструкций."
         )
         return
+
+    # Проверяем что это Wildberries (пока только его поддерживаем)
+    if marketplace_code != 'wildberries':
+        logger.warning(f"Неподдерживаемый маркетплейс: {marketplace_code}")
+        await message.answer(
+            "❌ Пока поддерживается только Wildberries.\n\n"
+            "Поддержка Ozon скоро появится!"
+        )
+        return
+
+    marketplace = 'Wildberries'
+    parser = wb_parser
 
     # Проверяем подписку на канал
     is_subscribed = await check_subscription(user_id)
@@ -280,18 +303,6 @@ async def handle_url(message: Message):
             f"⛔ Вы превысили лимит запросов!\n\n"
             f"Доступно: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час.\n"
             f"Пожалуйста, подождите немного и попробуйте снова."
-        )
-        return
-
-    # Проверяем что это ссылка на Wildberries
-    if 'wildberries.ru' in url or 'wb.ru' in url:
-        marketplace = 'Wildberries'
-        parser = wb_parser
-    else:
-        logger.warning(f"Неподдерживаемый URL: {url}")
-        await message.answer(
-            "❌ Неподдерживаемая ссылка!\n\n"
-            "Я работаю только с Wildberries."
         )
         return
 
@@ -438,15 +449,16 @@ async def handle_url(message: Message):
 
 async def main():
     """Основная функция запуска бота"""
-    logger.info("=" * 50)
-    logger.info("🤖 Бот запущен и готов к работе!")
-    logger.info(f"📊 Лимит отзывов: {wb_parser.max_reviews}")
-    logger.info(f"🛡️ Rate limit: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час")
-    logger.info("=" * 50)
+    # Очистка старых записей rate limit при старте
+    db.cleanup_old_rate_limits(hours=24)
+    logger.info("Очищены старые записи rate limit")
 
-    print("\n✅ Бот успешно запущен!")
-    print(f"⚙️  Лимит отзывов: {wb_parser.max_reviews}")
-    print(f"🛡️  Rate limit: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час\n")
+    logger.info("=" * 50)
+    logger.info("Бот запущен и готов к работе!")
+    logger.info(f"Лимит отзывов: {wb_parser.max_reviews}")
+    logger.info(f"Лимит вопросов: {wb_parser.max_questions}")
+    logger.info(f"Rate limit: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час")
+    logger.info("=" * 50)
 
     await dp.start_polling(bot)
 

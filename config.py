@@ -44,6 +44,15 @@ class Config:
     RETRY_MIN_WAIT: int = int(os.getenv('RETRY_MIN_WAIT', '2'))
     RETRY_MAX_WAIT: int = int(os.getenv('RETRY_MAX_WAIT', '10'))
 
+    # Supabase настройки (опционально, если не указано - используется SQLite)
+    SUPABASE_URL: str = os.getenv('SUPABASE_URL', '')
+    SUPABASE_KEY: str = os.getenv('SUPABASE_KEY', '')
+
+    @classmethod
+    def use_supabase(cls) -> bool:
+        """Проверяет, настроен ли Supabase"""
+        return bool(cls.SUPABASE_URL and cls.SUPABASE_KEY)
+
     @classmethod
     def validate(cls) -> None:
         """Валидация конфигурации"""

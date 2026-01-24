@@ -32,9 +32,10 @@ class WildberriesParserPlaywright:
     - Обходит защиту от ботов
     """
 
-    def __init__(self, max_reviews: int = None):
+    def __init__(self, max_reviews: int = None, max_questions: int = None):
         self.max_reviews = max_reviews or Config.MAX_REVIEWS
-        logger.info(f"Инициализирован WB парсер с max_reviews={self.max_reviews}")
+        self.max_questions = max_questions or Config.MAX_QUESTIONS
+        logger.info(f"Инициализирован WB парсер с max_reviews={self.max_reviews}, max_questions={self.max_questions}")
 
     def extract_product_id(self, url: str) -> Optional[str]:
         """Извлекает ID товара из URL"""
@@ -105,7 +106,7 @@ class WildberriesParserPlaywright:
                 url = response.url
 
                 # Логируем ВСЕ запросы для отладки
-                print(f"🔍 Запрос: {url[:100]}", flush=True)
+                logger.debug(f"Запрос: {url[:100]}")
 
                 # Обрабатываем вопросы - расширенный поиск по актуальным WB endpoints
                 question_keywords = [
@@ -124,11 +125,11 @@ class WildberriesParserPlaywright:
                     if not content_type.startswith('application/json'):
                         return
 
-                    print(f"💬 Найден API вопросов: {url[:150]}", flush=True)
+                    logger.info(f"Найден API вопросов: {url[:150]}")
                     try:
                         data = await response.json()
                         keys = list(data.keys()) if isinstance(data, dict) else 'not dict'
-                        print(f"📦 Структура ответа вопросов: {keys}", flush=True)
+                        logger.debug(f"Структура ответа вопросов: {keys}")
 
                         questions = None
                         if isinstance(data, dict):
@@ -146,10 +147,10 @@ class WildberriesParserPlaywright:
                             )
 
                         if questions and isinstance(questions, list) and len(questions) > 0:
-                            print(f"✅ Найдено {len(questions)} вопросов в API")
+                            logger.info(f"Найдено {len(questions)} вопросов в API")
 
                             for q_data in questions:
-                                if len(collected_questions) >= self.max_reviews:
+                                if len(collected_questions) >= self.max_questions:
                                     break
 
                                 # Извлекаем текст вопроса
@@ -189,10 +190,10 @@ class WildberriesParserPlaywright:
 
                                 if question['question']:
                                     collected_questions.append(question)
-                                    print(f"➕ Добавлен вопрос от {author}: {question_text[:30]}...")
+                                    logger.debug(f"Добавлен вопрос от {author}: {question_text[:30]}...")
 
                     except Exception as e:
-                        print(f"⚠️ Ошибка парсинга API вопросов: {e}")
+                        logger.warning(f"Ошибка парсинга API вопросов: {e}")
 
                 # Ищем запросы к API отзывов (любые варианты)
                 if ('/feedbacks' in url or '/feedback' in url or '/reviews' in url) and response.status == 200:
@@ -201,7 +202,7 @@ class WildberriesParserPlaywright:
                     if not content_type.startswith('application/json'):
                         return
 
-                    print(f"✨ Найден API отзывов: {url[:100]}")
+                    logger.info(f"Найден API отзывов: {url[:100]}")
                     try:
                         data = await response.json()
 
@@ -227,7 +228,7 @@ class WildberriesParserPlaywright:
                                              data.get('total') or 0)
 
                         if feedbacks and isinstance(feedbacks, list) and len(feedbacks) > 0:
-                            print(f"✅ Найдено {len(feedbacks)} отзывов в API: {url[:80]}...")
+                            logger.info(f"Найдено {len(feedbacks)} отзывов в API")
 
                             for feedback in feedbacks:
                                 if len(collected_reviews) >= self.max_reviews:
@@ -263,13 +264,13 @@ class WildberriesParserPlaywright:
 
                     except Exception as e:
                         # Не JSON или ошибка парсинга
-                        print(f"⚠️ Ошибка парсинга API отзывов: {e}")
+                        logger.warning(f"Ошибка парсинга API отзывов: {e}")
 
             # Подключаем перехватчик
             page.on('response', handle_response)
 
             try:
-                print(f"🌐 Открываем страницу WB: {product_url}")
+                logger.info(f"Открываем страницу WB: {product_url}")
 
                 # Открываем страницу и ждем загрузки сети
                 await page.goto(product_url, wait_until='networkidle', timeout=30000)
@@ -285,13 +286,13 @@ class WildberriesParserPlaywright:
 
                 # Переходим на страницу вопросов напрямую по URL
                 try:
-                    print("💬 Переходим на страницу вопросов...", flush=True)
+                    logger.info("Переходим на страницу вопросов...")
 
                     # Извлекаем артикул из URL и строим URL страницы вопросов
                     product_id = self.extract_product_id(product_url)
                     if product_id:
                         questions_url = f"https://www.wildberries.ru/catalog/{product_id}/questions"
-                        print(f"🔗 URL вопросов: {questions_url}", flush=True)
+                        logger.debug(f"URL вопросов: {questions_url}")
 
                         # Открываем страницу вопросов
                         await page.goto(questions_url, wait_until='networkidle', timeout=30000)
@@ -301,41 +302,41 @@ class WildberriesParserPlaywright:
                         for i in range(5):
                             await page.evaluate('window.scrollBy(0, 1000)')
                             await asyncio.sleep(0.7)
-                        print(f"📜 Прокрутка страницы вопросов завершена", flush=True)
+                        logger.debug("Прокрутка страницы вопросов завершена")
 
                         # Если API не перехватил вопросы, парсим из DOM
                         if len(collected_questions) == 0:
-                            print("🔍 API вопросов не найден, парсим из DOM...", flush=True)
+                            logger.info("API вопросов не найден, парсим из DOM...")
                             dom_questions = await self._parse_questions_from_dom(page)
                             collected_questions.extend(dom_questions)
-                            print(f"📝 Из DOM получено вопросов: {len(dom_questions)}", flush=True)
+                            logger.info(f"Из DOM получено вопросов: {len(dom_questions)}")
                     else:
-                        print("⚠️ Не удалось извлечь артикул товара из URL", flush=True)
+                        logger.warning("Не удалось извлечь артикул товара из URL")
                 except Exception as e:
-                    print(f"⚠️ Ошибка при загрузке страницы вопросов: {e}", flush=True)
+                    logger.warning(f"Ошибка при загрузке страницы вопросов: {e}")
 
                 # Финальная пауза
                 await asyncio.sleep(1)
 
-                print(f"📊 Собрано отзывов: {len(collected_reviews)}")
-                print(f"💬 Собрано вопросов: {len(collected_questions)}")
+                logger.info(f"Собрано отзывов: {len(collected_reviews)}")
+                logger.info(f"Собрано вопросов: {len(collected_questions)}")
 
             except Exception as e:
-                print(f"❌ Ошибка загрузки страницы: {e}")
+                logger.error(f"Ошибка загрузки страницы: {e}")
 
             finally:
                 await browser.close()
 
         return {
             'reviews': collected_reviews[:self.max_reviews],
-            'questions': collected_questions[:self.max_reviews]
+            'questions': collected_questions[:self.max_questions]
         }
 
     async def _parse_questions_from_dom(self, page) -> List[Dict]:
         """Парсит вопросы напрямую из DOM страницы"""
         questions = []
         try:
-            print("🔍 Парсим все содержимое страницы вопросов...", flush=True)
+            logger.debug("Парсим содержимое страницы вопросов...")
 
             # Собираем ВСЕ текстовые блоки на странице, которые могут быть вопросами
             # Ищем повторяющиеся структуры (карточки вопросов)
@@ -399,13 +400,13 @@ class WildberriesParserPlaywright:
                 return results.slice(0, 200);
             }''')
 
-            print(f"📦 Найдено {len(page_content)} текстовых блоков на странице", flush=True)
+            logger.debug(f"Найдено {len(page_content)} текстовых блоков на странице")
 
             if page_content:
-                # Выводим первые 3 для диагностики
+                # Логируем первые 3 для диагностики
                 for i, item in enumerate(page_content[:3]):
                     text_preview = item.get('text', '')[:80].replace('\n', ' ')
-                    print(f"  [{i+1}] ({item.get('tag')}): {text_preview}...", flush=True)
+                    logger.debug(f"  [{i+1}] ({item.get('tag')}): {text_preview}...")
 
                 # Обрабатываем найденные блоки
                 for item in page_content:
@@ -430,10 +431,10 @@ class WildberriesParserPlaywright:
                             'date': ''
                         })
 
-            print(f"✅ Отфильтровано вопросов: {len(questions)}", flush=True)
+            logger.debug(f"Отфильтровано вопросов: {len(questions)}")
 
         except Exception as e:
-            print(f"❌ Ошибка DOM-парсинга вопросов: {e}", flush=True)
+            logger.error(f"Ошибка DOM-парсинга вопросов: {e}")
 
         return questions
 
