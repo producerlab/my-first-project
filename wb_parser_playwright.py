@@ -105,10 +105,17 @@ class WildberriesParserPlaywright:
                 url = response.url
 
                 # Логируем ВСЕ запросы для отладки
-                print(f"🔍 Запрос: {url[:100]}")
+                print(f"🔍 Запрос: {url[:100]}", flush=True)
 
-                # Обрабатываем вопросы - расширенный поиск
-                question_keywords = ['/questions', '/question', '/qa', '/q&a', '/qna', '/answers']
+                # Обрабатываем вопросы - расширенный поиск по актуальным WB endpoints
+                question_keywords = [
+                    '/questions',
+                    '/question',
+                    'questions-api',
+                    'feedbacks-api.wildberries.ru/api/v1/question',
+                    '/qna',
+                    '/qa'
+                ]
                 is_question_api = any(keyword in url.lower() for keyword in question_keywords)
 
                 if is_question_api and response.status == 200:
@@ -117,28 +124,26 @@ class WildberriesParserPlaywright:
                     if not content_type.startswith('application/json'):
                         return
 
-                    print(f"💬 Найден возможный API вопросов: {url[:150]}")
+                    print(f"💬 Найден API вопросов: {url[:150]}", flush=True)
                     try:
                         data = await response.json()
-                        print(f"📦 Структура ответа: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
-
-                        # Логируем полный ответ для отладки (только первый раз)
-                        if not collected_questions:
-                            import json
-                            debug_file = f"debug_wb_questions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                            with open(debug_file, 'w', encoding='utf-8') as f:
-                                json.dump({'url': url, 'data': data}, f, ensure_ascii=False, indent=2)
-                            print(f"📝 Сохранён debug файл: {debug_file}")
+                        keys = list(data.keys()) if isinstance(data, dict) else 'not dict'
+                        print(f"📦 Структура ответа вопросов: {keys}", flush=True)
 
                         questions = None
                         if isinstance(data, dict):
-                            # Проверяем различные варианты структуры
-                            questions = (data.get('questions') or
-                                       data.get('data', {}).get('questions') if isinstance(data.get('data'), dict) else None or
-                                       data.get('qa') or
-                                       data.get('qna') or
-                                       data.get('questionList') or
-                                       data.get('items') or [])
+                            # Проверяем различные варианты структуры WB API
+                            questions = (
+                                data.get('questions') or
+                                data.get('data', {}).get('questions') if isinstance(data.get('data'), dict) else None or
+                                data.get('feedbacks') or  # иногда WB использует feedbacks для вопросов тоже
+                                data.get('qa') or
+                                data.get('qna') or
+                                data.get('questionList') or
+                                data.get('items') or
+                                data.get('result') or
+                                []
+                            )
 
                         if questions and isinstance(questions, list) and len(questions) > 0:
                             print(f"✅ Найдено {len(questions)} вопросов в API")
@@ -280,39 +285,55 @@ class WildberriesParserPlaywright:
 
                 # Ищем и кликаем на вкладку "Вопросы"
                 try:
-                    print("💬 Пытаемся открыть вкладку с вопросами...")
+                    print("💬 Пытаемся открыть вкладку с вопросами...", flush=True)
 
-                    # Пробуем разные варианты селекторов для вкладки вопросов
+                    # Актуальные селекторы для WB (2026)
                     question_selectors = [
-                        'text=Вопросы',
-                        'text=Вопрос',
-                        'text=Вопросы и ответы',
-                        'text=Q&A',
+                        # По тексту
+                        'text="Вопросы"',
+                        'text="Вопросы о товаре"',
+                        ':text("Вопрос")',
+                        # По атрибутам data-*
                         '[data-link="questions"]',
-                        'a:has-text("Вопрос")',
-                        'button:has-text("Вопрос")'
+                        '[data-tab="questions"]',
+                        '[data-widget="Questions"]',
+                        '[data-testid="questions-tab"]',
+                        # По классам (общие паттерны WB)
+                        '.product-page__tab:has-text("Вопрос")',
+                        '.tabs__item:has-text("Вопрос")',
+                        '.tab:has-text("Вопрос")',
+                        # Ссылки и кнопки
+                        'a:has-text("Вопросы")',
+                        'button:has-text("Вопросы")',
+                        'span:has-text("Вопросы")',
+                        # Fallback - любой кликабельный элемент с текстом
+                        '[role="tab"]:has-text("Вопрос")'
                     ]
 
                     clicked = False
                     for selector in question_selectors:
                         try:
-                            await page.click(selector, timeout=2000)
-                            print(f"✅ Открыта вкладка вопросов через селектор: {selector}")
-                            clicked = True
-                            break
+                            element = await page.wait_for_selector(selector, timeout=1500, state='visible')
+                            if element:
+                                await element.click()
+                                print(f"✅ Открыта вкладка вопросов через селектор: {selector}", flush=True)
+                                clicked = True
+                                break
                         except:
                             continue
 
                     if clicked:
-                        await asyncio.sleep(2)
-                        # Прокручиваем вопросы
-                        for i in range(3):
-                            await page.evaluate('window.scrollBy(0, 1000)')
-                            await asyncio.sleep(0.5)
+                        # Ждём загрузки вопросов
+                        await asyncio.sleep(3)
+                        # Прокручиваем для загрузки всех вопросов
+                        for i in range(5):
+                            await page.evaluate('window.scrollBy(0, 800)')
+                            await asyncio.sleep(0.7)
+                        print(f"📜 Прокрутка вопросов завершена", flush=True)
                     else:
-                        print("ℹ️ Вкладка вопросов не найдена (возможно, её нет на странице)")
+                        print("ℹ️ Вкладка вопросов не найдена (возможно, у товара нет вопросов)", flush=True)
                 except Exception as e:
-                    print(f"⚠️ Ошибка при работе с вкладкой вопросов: {e}")
+                    print(f"⚠️ Ошибка при работе с вкладкой вопросов: {e}", flush=True)
 
                 # Финальная пауза
                 await asyncio.sleep(1)
