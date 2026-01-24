@@ -331,19 +331,49 @@ class WildberriesParserPlaywright:
                             await asyncio.sleep(0.7)
                         print(f"📜 Прокрутка вопросов завершена", flush=True)
 
-                        # Диагностика: выводим классы элементов на странице
-                        page_classes = await page.evaluate('''() => {
-                            const classes = new Set();
+                        # Диагностика: выводим классы и структуру страницы
+                        diagnostics = await page.evaluate('''() => {
+                            const result = {
+                                questionClasses: [],
+                                allMainClasses: [],
+                                visibleTexts: []
+                            };
+
+                            // Ищем классы с question/qa
                             document.querySelectorAll('*').forEach(el => {
                                 el.classList.forEach(c => {
                                     if (c.toLowerCase().includes('question') || c.toLowerCase().includes('qa')) {
-                                        classes.add(c);
+                                        if (!result.questionClasses.includes(c)) {
+                                            result.questionClasses.push(c);
+                                        }
                                     }
                                 });
                             });
-                            return Array.from(classes).slice(0, 30);
+
+                            // Ищем основные контейнеры (первые 20 уникальных классов блочных элементов)
+                            document.querySelectorAll('div, section, article, ul, li').forEach(el => {
+                                if (el.classList.length > 0 && result.allMainClasses.length < 30) {
+                                    const cls = el.classList[0];
+                                    if (cls && !result.allMainClasses.includes(cls) && cls.length < 50) {
+                                        result.allMainClasses.push(cls);
+                                    }
+                                }
+                            });
+
+                            // Собираем видимые текстовые блоки (возможные вопросы)
+                            document.querySelectorAll('div, p, span, li').forEach(el => {
+                                const text = el.innerText?.trim();
+                                if (text && text.length > 30 && text.length < 500 &&
+                                    text.includes('?') && result.visibleTexts.length < 10) {
+                                    result.visibleTexts.push(text.substring(0, 100));
+                                }
+                            });
+
+                            return result;
                         }''')
-                        print(f"🔎 Классы с 'question/qa' на странице: {page_classes}", flush=True)
+                        print(f"🔎 Классы question/qa: {diagnostics.get('questionClasses', [])[:15]}", flush=True)
+                        print(f"🔎 Основные классы: {diagnostics.get('allMainClasses', [])[:15]}", flush=True)
+                        print(f"🔎 Тексты с '?': {diagnostics.get('visibleTexts', [])[:5]}", flush=True)
 
                         # Если API не перехватил вопросы, парсим из DOM
                         if len(collected_questions) == 0:
@@ -488,27 +518,28 @@ class WildberriesParserPlaywright:
             if not questions:
                 print("🔄 Пробуем универсальный парсинг вопросов...", flush=True)
 
-                # Парсим структуру вопросов на WB - ищем блоки с вопросами и ответами
+                # Ищем тексты с вопросительным знаком - это наверняка вопросы
                 all_questions = await page.evaluate('''() => {
                     const results = [];
+                    const seen = new Set();
 
-                    // Ищем все блоки, которые содержат вопросы (исключаем счётчики и кнопки)
-                    const questionBlocks = document.querySelectorAll(
-                        '[class*="question"]:not(button):not([class*="count"]):not([class*="tab"]):not([class*="btn"])'
-                    );
+                    // Ищем все элементы с текстом содержащим "?"
+                    document.querySelectorAll('div, p, span, li, article').forEach(el => {
+                        const text = el.innerText?.trim();
 
-                    questionBlocks.forEach(el => {
-                        const text = el.innerText.trim();
-                        // Фильтруем: текст должен быть достаточно длинным и НЕ быть счётчиком
-                        // Исключаем тексты типа "29 вопросов", "Вопросы (10)" и т.д.
-                        const isCounter = /^\d+\s*(вопрос|question)/i.test(text) ||
-                                         /^(вопрос|question).*\d+$/i.test(text) ||
-                                         text.length < 20;
+                        // Текст должен содержать "?" и быть достаточно длинным
+                        if (text && text.includes('?') && text.length > 15 && text.length < 2000) {
+                            // Исключаем счётчики и навигацию
+                            const isCounter = /^\d+\s*(вопрос|question)/i.test(text) ||
+                                             /^вопрос/i.test(text) && text.length < 50;
 
-                        if (text && !isCounter && text.length > 20 && text.length < 3000) {
-                            // Проверяем, не добавили ли мы уже этот текст
-                            if (!results.some(r => r.includes(text.substring(0, 50)))) {
-                                results.push(text);
+                            if (!isCounter) {
+                                // Берём уникальные тексты
+                                const key = text.substring(0, 80);
+                                if (!seen.has(key)) {
+                                    seen.add(key);
+                                    results.push(text);
+                                }
                             }
                         }
                     });
