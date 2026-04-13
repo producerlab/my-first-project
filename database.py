@@ -224,6 +224,15 @@ class Database:
             'total_reviews': total_reviews
         }
 
+    def get_all_user_ids(self) -> List[int]:
+        """Возвращает список всех user_id (для рассылки)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users')
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
     def cleanup_old_rate_limits(self, hours: int = 24):
         """Удаляет старые записи rate limit"""
         conn = sqlite3.connect(self.db_path)

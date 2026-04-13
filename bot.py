@@ -50,15 +50,9 @@ dp = Dispatcher(storage=storage)
 wb_parser = WildberriesParserPlaywright(max_reviews=Config.MAX_REVIEWS)
 excel_exporter = ExcelExporter()
 
-# Выбор базы данных: Supabase (если настроен) или SQLite
-if Config.use_supabase():
-    from supabase_database import SupabaseDatabase
-    db = SupabaseDatabase()
-    logger.info("Используется Supabase база данных")
-else:
-    from database import Database
-    db = Database()
-    logger.info("Используется локальная SQLite база данных")
+from database import Database
+db = Database()
+logger.info("Используется локальная SQLite база данных")
 
 # Настройки из Config (загружаются из .env)
 RATE_LIMIT_REQUESTS = Config.RATE_LIMIT_REQUESTS
@@ -210,11 +204,7 @@ async def cmd_admin_broadcast(message: Message):
         return
 
     # Получаем всех пользователей
-    conn = db.conn = sqlite3.connect(db.db_path)
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM users')
-    users = cursor.fetchall()
-    conn.close()
+    users = [(uid,) for uid in db.get_all_user_ids()]
 
     # Отправляем сообщение всем
     sent = 0

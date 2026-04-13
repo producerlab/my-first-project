@@ -13,6 +13,3 @@ playwright==1.57.0
 
 # Retry logic
 tenacity==8.2.3
-
-# Database
-supabase==2.10.0

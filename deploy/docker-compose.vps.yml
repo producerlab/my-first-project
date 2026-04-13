@@ -1,0 +1,32 @@
+version: "3.9"
+
+name: wbparser
+
+services:
+  bot:
+    image: wbparser-bot
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: wbparser_bot
+    restart: unless-stopped
+    env_file: ../.env.prod
+    volumes:
+      - /tmp:/tmp
+      - wbparser_data:/app/data
+      - wbparser_exports:/app/exports
+    networks:
+      - wbparser_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  wbparser_data:
+  wbparser_exports:
+
+networks:
+  wbparser_net:
+    driver: bridge
