@@ -145,8 +145,19 @@ class WildberriesParserPlaywright:
                         if isinstance(data, dict):
                             # Проверяем различные варианты структуры WB API
                             questions = data.get('questions')
+                            # Новый формат WB: questions может быть dict с вложенным списком
+                            if isinstance(questions, dict):
+                                questions = (
+                                    questions.get('items') or
+                                    questions.get('list') or
+                                    questions.get('data') or
+                                    questions.get('questions') or
+                                    []
+                                )
                             if not questions and isinstance(data.get('data'), dict):
                                 questions = data['data'].get('questions')
+                                if isinstance(questions, dict):
+                                    questions = questions.get('items') or questions.get('list') or []
                             if not questions:
                                 questions = (
                                     data.get('feedbacks') or
@@ -157,6 +168,10 @@ class WildberriesParserPlaywright:
                                     data.get('result') or
                                     []
                                 )
+
+                        # Диагностика: что в итоге получили
+                        logger.info(f"Тип questions: {type(questions).__name__}, "
+                                    f"длина: {len(questions) if hasattr(questions, '__len__') else 'N/A'}")
 
                         if questions and isinstance(questions, list) and len(questions) > 0:
                             logger.info(f"Найдено {len(questions)} вопросов в API")
