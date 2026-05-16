@@ -321,11 +321,11 @@ class WildberriesParserPlaywright:
             try:
                 logger.info(f"Открываем страницу WB: {product_url}")
 
-                # Открываем страницу и ждем загрузки сети
-                await page.goto(product_url, wait_until='networkidle', timeout=30000)
+                # Открываем страницу (networkidle на WB не достигается — используем domcontentloaded)
+                await page.goto(product_url, wait_until='domcontentloaded', timeout=30000)
 
-                # Ждем еще немного для подгрузки отзывов
-                await asyncio.sleep(2)
+                # Ждем подгрузки данных
+                await asyncio.sleep(3)
 
                 # Извлекаем артикул из URL
                 product_id = self.extract_product_id(product_url)
@@ -337,13 +337,15 @@ class WildberriesParserPlaywright:
                         feedbacks_url = f"https://www.wildberries.ru/catalog/{product_id}/feedbacks"
                         logger.debug(f"URL отзывов: {feedbacks_url}")
 
-                        await page.goto(feedbacks_url, wait_until='networkidle', timeout=30000)
+                        await page.goto(feedbacks_url, wait_until='domcontentloaded', timeout=30000)
                         await asyncio.sleep(2)
 
                         # Прокручиваем для загрузки всех отзывов
-                        for i in range(5):
-                            await page.evaluate('window.scrollBy(0, 1000)')
-                            await asyncio.sleep(0.7)
+                        for i in range(8):
+                            await page.evaluate('window.scrollBy(0, 1500)')
+                            await asyncio.sleep(1.0)
+                        # Финальная пауза — дать поздним API-ответам прийти
+                        await asyncio.sleep(3)
                         logger.debug("Прокрутка страницы отзывов завершена")
                     except Exception as e:
                         logger.warning(f"Ошибка при загрузке страницы отзывов: {e}")
@@ -356,13 +358,15 @@ class WildberriesParserPlaywright:
                         logger.debug(f"URL вопросов: {questions_url}")
 
                         # Открываем страницу вопросов
-                        await page.goto(questions_url, wait_until='networkidle', timeout=30000)
-                        await asyncio.sleep(2)
+                        await page.goto(questions_url, wait_until='domcontentloaded', timeout=30000)
+                        await asyncio.sleep(3)
 
                         # Прокручиваем для загрузки всех вопросов
-                        for i in range(5):
-                            await page.evaluate('window.scrollBy(0, 1000)')
-                            await asyncio.sleep(0.7)
+                        for i in range(8):
+                            await page.evaluate('window.scrollBy(0, 1500)')
+                            await asyncio.sleep(1.0)
+                        # Финальная пауза — дать поздним API-ответам с вопросами прийти
+                        await asyncio.sleep(3)
                         logger.debug("Прокрутка страницы вопросов завершена")
 
                         # Если API не перехватил вопросы, парсим из DOM
