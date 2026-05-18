@@ -13,3 +13,6 @@ playwright==1.57.0
 
 # Retry logic
 tenacity==8.2.3
+
+# Telegram-алерты (дедупликация ошибок)
+cachetools>=5.0

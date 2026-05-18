@@ -46,6 +46,15 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# ─── Подключение Telegram-алертов ошибок (ERROR/CRITICAL → группа Tech Alerts) ─
+try:
+    from alerting import set_bot as _alert_set_bot, setup_alerting as _alert_setup
+    _alert_set_bot(bot)
+    _alert_setup()
+except Exception as _alert_err:
+    logger.warning(f"alerting init failed: {_alert_err}")
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Инициализация парсера и экспортера
 wb_parser = WildberriesParserPlaywright(max_reviews=Config.MAX_REVIEWS)
 excel_exporter = ExcelExporter()
