@@ -239,6 +239,18 @@ async def cmd_admin_broadcast(message: Message):
     logger.info(f"Админ {user_id} сделал рассылку: отправлено={sent}, ошибок={failed}")
 
 
+@dp.message(Command("test_alert"))
+async def cmd_test_alert(message: Message):
+    """Тестирование Telegram-алертов (только для админов). Удалить после проверки."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    try:
+        raise ValueError("alerting test from /test_alert command")
+    except ValueError:
+        logging.exception("проверка алертов")
+    await message.answer("Тестовый алерт отправлен — проверь группу Tech Alerts")
+
+
 @dp.message(F.text)
 async def handle_url(message: Message):
     """Обработчик URL товара"""
