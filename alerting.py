@@ -43,6 +43,19 @@ SUPPRESS_PATTERNS = (
     "chat not found",
 )
 
+# Самовосстанавливающиеся сбои long-polling. Алертим только если повторяются
+# подряд (см. THROTTLE_THRESHOLD), иначе шум.
+THROTTLE_PATTERNS = (
+    "failed to fetch updates",
+    "telegramnetworkerror",
+    "telegramconflicterror",
+    "connection reset by peer",
+    "server disconnected",
+    "clientconnectorerror",
+)
+THROTTLE_WINDOW_SECONDS = 300  # 5 минут
+THROTTLE_THRESHOLD = 5         # алертим только начиная с N-й ошибки в окне
+
 MSK = timezone(timedelta(hours=3))
 
 # ─── Состояние ────────────────────────────────────────────────────────────────
@@ -52,6 +65,7 @@ _dedup_cache: TTLCache = TTLCache(maxsize=DEDUP_MAX_KEYS, ttl=DEDUP_TTL_SECONDS)
 _hour_bucket_start: float = 0.0
 _hour_bucket_count: int = 0
 _suppressed_notified: bool = False
+_throttle_events: list[float] = []
 
 
 def set_bot(bot) -> None:
@@ -111,6 +125,21 @@ def _is_suppressed(text: str) -> bool:
     return any(p in lower for p in SUPPRESS_PATTERNS)
 
 
+def _is_throttled(text: str) -> bool:
+    """True если это самовосстанавливающаяся ошибка и она ещё не накопилась до порога."""
+    lower = text.lower()
+    if not any(p in lower for p in THROTTLE_PATTERNS):
+        return False
+    now = time.monotonic()
+    # Чистим старые события
+    cutoff = now - THROTTLE_WINDOW_SECONDS
+    while _throttle_events and _throttle_events[0] < cutoff:
+        _throttle_events.pop(0)
+    _throttle_events.append(now)
+    # Алертим только если достигли порога серии
+    return len(_throttle_events) < THROTTLE_THRESHOLD
+
+
 class TelegramAlertHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__(level=logging.ERROR)
@@ -123,6 +152,8 @@ class TelegramAlertHandler(logging.Handler):
             if record.exc_info and record.exc_info[1]:
                 full_text += " " + str(record.exc_info[1])
             if _is_suppressed(full_text):
+                return
+            if _is_throttled(full_text):
                 return
             sig = _signature(record)
             if sig in _dedup_cache:
