@@ -531,3 +531,35 @@ class WildberriesParserPlaywright:
                 'Минусы': ''
             })
         return formatted
+
+
+def filter_reviews_by_rating(reviews: List[Dict], filter_type: str) -> List[Dict]:
+    """Фильтрует отзывы по рейтингу (поле 'rating', int 1-5).
+
+    filter_type:
+      'all'                 — без фильтрации
+      '1'..'5'              — одна оценка
+      '1-2' / '1-3' / '4-5' — диапазон
+      '2,5'                 — произвольный набор (ручной выбор)
+    Неизвестный filter_type возвращает список без изменений.
+    """
+    if not filter_type or filter_type == 'all':
+        return reviews
+
+    if ',' in filter_type:
+        try:
+            allowed = {int(x) for x in filter_type.split(',')}
+        except ValueError:
+            return reviews
+        return [r for r in reviews if r.get('rating') in allowed]
+
+    ranges = {'1-2': {1, 2}, '1-3': {1, 2, 3}, '4-5': {4, 5}}
+    if filter_type in ranges:
+        allowed = ranges[filter_type]
+        return [r for r in reviews if r.get('rating') in allowed]
+
+    try:
+        star = int(filter_type)
+    except ValueError:
+        return reviews
+    return [r for r in reviews if r.get('rating') == star]
