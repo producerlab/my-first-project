@@ -562,4 +562,7 @@ def filter_reviews_by_rating(reviews: List[Dict], filter_type: str) -> List[Dict
         star = int(filter_type)
     except ValueError:
         return reviews
+    if not 1 <= star <= 5:
+        return reviews
     return [r for r in reviews if r.get('rating') == star]
+

@@ -52,3 +52,12 @@ def test_rating_zero_excluded_by_filters():
 
 def test_unknown_filter_returns_all():
     assert filter_reviews_by_rating(_reviews(), 'garbage') == _reviews()
+
+
+def test_out_of_range_single_star_returns_all():
+    assert filter_reviews_by_rating(_reviews(), '9') == _reviews()
+
+
+def test_unsupported_range_returns_all():
+    assert filter_reviews_by_rating(_reviews(), '2-4') == _reviews()
+
