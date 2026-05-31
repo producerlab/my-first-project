@@ -243,13 +243,16 @@ async def cmd_history(message: Message):
 @dp.callback_query(F.data.startswith("dl:"))
 async def on_download(callback: CallbackQuery):
     """Повторно отправляет ранее сгенерированные файлы по сохранённому file_id"""
-    req_id = int(callback.data.split(":", 1)[1])
+    try:
+        req_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный запрос.", show_alert=True)
+        return
     rows = db.get_recent_requests(callback.from_user.id, limit=50)
     row = next((r for r in rows if r['id'] == req_id), None)
     if not row or not row.get('reviews_file_id'):
         await callback.answer("Файлы не найдены.", show_alert=True)
         return
-    await callback.message.answer("📦 Повторная отправка файлов:")
     try:
         await callback.message.answer_document(row['reviews_file_id'])
         if row.get('questions_file_id'):
