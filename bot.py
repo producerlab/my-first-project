@@ -224,8 +224,9 @@ async def cmd_stats(message: Message):
 async def cmd_history(message: Message):
     """Показывает последние запросы и позволяет переотправить файлы по file_id"""
     user_id = message.from_user.id
-    rows = db.get_recent_requests(user_id, limit=5)
-    rows = [r for r in rows if r['success'] and r.get('reviews_file_id')]
+    rows = db.get_recent_requests(user_id, limit=20)
+    rows = [r for r in rows if r['success'] and (r.get('reviews_file_id') or r.get('questions_file_id'))]
+    rows = rows[:5]
     if not rows:
         await message.answer("📭 История пока пуста. Отправьте ссылку на товар, чтобы начать.")
         return
@@ -255,14 +256,21 @@ async def on_download(callback: CallbackQuery):
         return
     rows = db.get_recent_requests(callback.from_user.id, limit=50)
     row = next((r for r in rows if r['id'] == req_id), None)
-    if not row or not row.get('reviews_file_id'):
+    if not row or not (row.get('reviews_file_id') or row.get('questions_file_id')):
         await callback.answer("Файлы не найдены.", show_alert=True)
         return
     try:
-        await callback.message.answer_document(row['reviews_file_id'])
+        sent_any = False
+        if row.get('reviews_file_id'):
+            await callback.message.answer_document(row['reviews_file_id'])
+            sent_any = True
         if row.get('questions_file_id'):
             await callback.message.answer_document(row['questions_file_id'])
-        await callback.answer("Файлы отправлены!")
+            sent_any = True
+        if sent_any:
+            await callback.answer("Файлы отправлены!")
+        else:
+            await callback.answer("Файлы не найдены.", show_alert=True)
     except Exception as e:
         logger.error(f"Не удалось переотправить файлы: {e}")
         await callback.answer("Файл недоступен, соберите заново.", show_alert=True)
