@@ -92,17 +92,14 @@ FILTER_LABELS = {
 
 def build_filter_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐ Все отзывы", callback_data="flt:all")
-    builder.button(text="1★", callback_data="flt:1")
-    builder.button(text="1–2★", callback_data="flt:1-2")
-    builder.button(text="1–3★", callback_data="flt:1-3")
-    builder.button(text="4–5★", callback_data="flt:4-5")
+    for key, label in FILTER_LABELS.items():
+        builder.button(text=label, callback_data=f"flt:{key}")
     builder.button(text="🔢 Выбрать вручную", callback_data="flt:custom")
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 
-def build_star_keyboard(selected: set) -> InlineKeyboardMarkup:
+def build_star_keyboard(selected: set[int]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for star in range(1, 6):
         mark = "✅ " if star in selected else ""
