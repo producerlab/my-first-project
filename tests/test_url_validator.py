@@ -216,3 +216,14 @@ class TestBareArticle:
     def test_normal_url_unchanged(self):
         url = 'https://www.wildberries.ru/catalog/12345678/detail.aspx'
         assert URLValidator.sanitize_url(url) == url
+
+    def test_bare_article_min_boundary(self):
+        assert URLValidator.sanitize_url('123456') == \
+            'https://www.wildberries.ru/catalog/123456/detail.aspx'
+
+    def test_bare_article_max_boundary(self):
+        assert URLValidator.sanitize_url('123456789012') == \
+            'https://www.wildberries.ru/catalog/123456789012/detail.aspx'
+
+    def test_too_long_digits_not_treated_as_article(self):
+        assert URLValidator.sanitize_url('1234567890123') == '1234567890123'
