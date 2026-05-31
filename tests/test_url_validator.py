@@ -191,3 +191,28 @@ class TestURLValidator:
         marketplace, product_id = URLValidator.validate_url(url)
         assert marketplace == "wildberries"
         assert product_id == "123"
+
+
+class TestBareArticle:
+    """Тесты приёма чистого артикула"""
+
+    def test_bare_article_expands_to_canonical_url(self):
+        result = URLValidator.sanitize_url('12345678')
+        assert result == 'https://www.wildberries.ru/catalog/12345678/detail.aspx'
+
+    def test_bare_article_validates_as_wildberries(self):
+        url = URLValidator.sanitize_url('12345678')
+        marketplace, product_id = URLValidator.validate_url(url)
+        assert marketplace == 'wildberries'
+        assert product_id == '12345678'
+
+    def test_bare_article_with_whitespace(self):
+        assert URLValidator.sanitize_url('  12345678  ') == \
+            'https://www.wildberries.ru/catalog/12345678/detail.aspx'
+
+    def test_too_short_digits_not_treated_as_article(self):
+        assert URLValidator.sanitize_url('12345') == '12345'
+
+    def test_normal_url_unchanged(self):
+        url = 'https://www.wildberries.ru/catalog/12345678/detail.aspx'
+        assert URLValidator.sanitize_url(url) == url

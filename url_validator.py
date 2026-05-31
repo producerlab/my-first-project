@@ -142,6 +142,10 @@ class URLValidator:
         # Удаление пробелов по краям
         url = url.strip()
 
+        # Чистый артикул (6-12 цифр) → канонический URL товара WB
+        if url.isdigit() and 6 <= len(url) <= 12:
+            return f'https://www.wildberries.ru/catalog/{url}/detail.aspx'
+
         # Удаление опасных протоколов
         dangerous_protocols = ['javascript:', 'data:', 'file:', 'vbscript:']
         url_lower = url.lower()
