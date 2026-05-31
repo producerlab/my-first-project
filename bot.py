@@ -239,9 +239,10 @@ async def cmd_admin_broadcast(message: Message):
     logger.info(f"Админ {user_id} сделал рассылку: отправлено={sent}, ошибок={failed}")
 
 
-@dp.message(F.text)
+@dp.message(F.text, F.chat.type == "private")
 async def handle_url(message: Message):
-    """Обработчик URL товара"""
+    """Обработчик URL товара. Работает только в личных сообщениях —
+    в группах (например, в Tech Alerts) бот не реагирует на текст."""
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
     url = message.text.strip()
