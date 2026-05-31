@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 
-from wb_parser_playwright import WildberriesParserPlaywright
+from wb_parser_playwright import WildberriesParserPlaywright, filter_reviews_by_rating
 from excel_exporter import ExcelExporter
 from config import Config
 from url_validator import URLValidator
@@ -286,12 +286,13 @@ async def cmd_admin_broadcast(message: Message):
 
 
 @dp.message(F.text, F.chat.type == "private")
-async def handle_url(message: Message):
-    """Обработчик URL товара. Работает только в личных сообщениях —
-    в группах (например, в Tech Alerts) бот не реагирует на текст."""
+async def handle_url(message: Message, state: FSMContext):
+    """Принимает ссылку или артикул, валидирует, проверяет подписку,
+    показывает кнопки фильтра. Сбор запускается после выбора фильтра.
+    Работает только в личных сообщениях — в группах бот не реагирует на текст."""
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
-    url = message.text.strip()
+    raw = message.text.strip()
 
     # Сохраняем/обновляем пользователя
     db.add_or_update_user(
@@ -301,15 +302,15 @@ async def handle_url(message: Message):
         message.from_user.last_name
     )
 
-    logger.info(f"Пользователь {user_id} ({username}) отправил URL: {url}")
+    logger.info(f"Пользователь {user_id} ({username}) отправил: {raw}")
 
-    # Валидация URL через URLValidator
+    # Валидация URL/артикула через URLValidator
     try:
-        sanitized_url = URLValidator.sanitize_url(url)
+        sanitized_url = URLValidator.sanitize_url(raw)
         marketplace_code, product_id = URLValidator.validate_url(sanitized_url)
         url = sanitized_url  # Используем очищенный URL
     except InvalidURLError as e:
-        logger.warning(f"Невалидный URL от {user_id}: {e}")
+        logger.warning(f"Невалидный ввод от {user_id}: {e}")
         await message.answer(
             f"❌ {e.reason}\n\n"
             "Используйте /help для получения инструкций."
@@ -325,9 +326,6 @@ async def handle_url(message: Message):
         )
         return
 
-    marketplace = 'Wildberries'
-    parser = wb_parser
-
     # Проверяем подписку на канал
     is_subscribed = await check_subscription(user_id)
     if not is_subscribed:
@@ -340,9 +338,33 @@ async def handle_url(message: Message):
         )
         return
 
+    # Сохраняем данные в FSM и показываем кнопки фильтра.
+    # Rate-limit проверяется и списывается только при запуске сбора (run_collection).
+    await state.set_state(CollectStates.waiting_filter)
+    await state.update_data(
+        url=url, product_id=product_id, marketplace='Wildberries', custom_stars=[]
+    )
+    await message.answer(
+        f"✅ <b>Товар найден!</b> Артикул: <code>{product_id}</code>\n\n"
+        "Выберите фильтр для отзывов (вопросы собираются всегда полностью):",
+        reply_markup=build_filter_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+async def run_collection(message: Message, user_id: int, data: dict):
+    """Выполняет сбор: rate-limit → парсинг → фильтрация → Excel → отправка → сводка → file_id."""
+    url = data['url']
+    product_id = data['product_id']
+    marketplace = data['marketplace']
+    filter_type = data['filter']
+    parser = wb_parser
+
+    # Отмечаем задачу как активную
+    active_tasks[user_id] = {'cancelled': False, 'marketplace': marketplace}
+
     # Проверяем rate limit
     can_request, remaining = db.check_rate_limit(user_id, RATE_LIMIT_REQUESTS, RATE_LIMIT_HOURS)
-
     if not can_request:
         logger.warning(f"Пользователь {user_id} превысил лимит запросов")
         await message.answer(
@@ -350,13 +372,11 @@ async def handle_url(message: Message):
             f"Доступно: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час.\n"
             f"Пожалуйста, подождите немного и попробуйте снова."
         )
+        active_tasks.pop(user_id, None)
         return
 
     # Добавляем запись о rate limit
     db.add_rate_limit_record(user_id)
-
-    # Отмечаем задачу как активную
-    active_tasks[user_id] = {'cancelled': False, 'marketplace': marketplace}
 
     # Уведомляем пользователя о начале парсинга
     status_msg = await message.answer(
@@ -383,7 +403,7 @@ async def handle_url(message: Message):
             logger.error(f"Ошибка обновления прогресса: {e}")
 
     try:
-        logger.info(f"Начало парсинга {marketplace} для пользователя {user_id}")
+        logger.info(f"Начало парсинга {marketplace} для пользователя {user_id} (фильтр={filter_type})")
 
         # Парсим отзывы (и вопросы для WB)
         result = await parser.get_reviews(url, progress_callback=update_progress)
@@ -392,24 +412,32 @@ async def handle_url(message: Message):
         if user_id in active_tasks and active_tasks[user_id]['cancelled']:
             logger.info(f"Парсинг отменён пользователем {user_id}")
             await status_msg.edit_text("⛔ Парсинг отменён")
-            del active_tasks[user_id]
+            active_tasks.pop(user_id, None)
             return
 
         # Результат - dict с reviews и questions
-        reviews = result.get('reviews', [])
+        reviews_all = result.get('reviews', [])
         questions = result.get('questions', [])
+        total_reviews_raw = len(reviews_all)
+
+        # Фильтрация отзывов по выбранному фильтру
+        reviews = filter_reviews_by_rating(reviews_all, filter_type)
+        avg_rating = round(
+            sum(r.get('rating', 0) for r in reviews) / len(reviews), 1
+        ) if reviews else 0
 
         if not reviews and not questions:
             logger.warning(f"Не найдено отзывов и вопросов: {url}")
             await status_msg.edit_text(
-                f"😔 Не удалось найти отзывы по этой ссылке.\n\n"
+                "😔 Не удалось найти отзывы по этой ссылке.\n\n"
                 "Возможные причины:\n"
                 "• Товар ещё не имеет отзывов\n"
-                "• Неверная ссылка\n"
+                "• Под выбранный фильтр ничего не попало\n"
                 "• Маркетплейс изменил API"
             )
             db.add_request(user_id, marketplace, url, 0, success=False,
-                          error_message="Отзывы не найдены")
+                           error_message="Отзывы не найдены", filter_type=filter_type)
+            active_tasks.pop(user_id, None)
             return
 
         # Форматируем для Excel
@@ -449,23 +477,43 @@ async def handle_url(message: Message):
             logger.info(f"Создан файл вопросов: {questions_filepath} ({len(questions)} вопросов)")
             files_to_send.append(('questions', questions_filepath, len(questions)))
 
-        # Отправляем файлы пользователю
+        # Отправляем файлы пользователю, захватывая file_id
+        reviews_file_id = None
+        questions_file_id = None
         for file_type, filepath, count in files_to_send:
             file = FSInputFile(filepath)
             file_name = "отзывов" if file_type == 'reviews' else "вопросов"
-            await message.answer_document(
+            sent = await message.answer_document(
                 file,
                 caption=f"✅ Готово!\n\n"
                         f"📊 Собрано {file_name}: {count}\n"
                         f"🏪 Маркетплейс: {marketplace}\n"
                         f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
+            if sent.document:
+                if file_type == 'reviews':
+                    reviews_file_id = sent.document.file_id
+                else:
+                    questions_file_id = sent.document.file_id
 
-        await status_msg.delete()
+        # Сводка
+        await status_msg.edit_text(
+            "✅ <b>Готово!</b>\n\n"
+            f"📦 Артикул: <code>{product_id}</code>\n"
+            f"🔍 Фильтр: {filter_label(filter_type)}\n"
+            f"⭐ Отзывов: <b>{len(reviews)}</b> (всего {total_reviews_raw} без фильтра)\n"
+            f"❓ Вопросов: <b>{len(questions)}</b>\n"
+            f"📊 Средний рейтинг: <b>{avg_rating}</b>",
+            parse_mode="HTML",
+        )
 
         # Сохраняем успешный запрос в БД
-        total_items = len(reviews) + len(questions)
-        db.add_request(user_id, marketplace, url, total_items, success=True)
+        db.add_request(
+            user_id, marketplace, url, len(reviews), success=True,
+            filter_type=filter_type, questions_count=len(questions),
+            avg_rating=avg_rating, reviews_file_id=reviews_file_id,
+            questions_file_id=questions_file_id,
+        )
 
         logger.info(f"Успешно отправлены файлы пользователю {user_id}")
 
@@ -478,7 +526,7 @@ async def handle_url(message: Message):
         logger.error(f"Ошибка валидации: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
         db.add_request(user_id, marketplace, url, 0, success=False,
-                      error_message=str(e))
+                       error_message=str(e), filter_type=filter_type)
     except Exception as e:
         logger.error(f"Неожиданная ошибка при парсинге: {e}", exc_info=True)
         await status_msg.edit_text(
@@ -486,11 +534,10 @@ async def handle_url(message: Message):
             "Попробуйте другую ссылку или обратитесь к администратору."
         )
         db.add_request(user_id, marketplace, url, 0, success=False,
-                      error_message=str(e))
+                       error_message=str(e), filter_type=filter_type)
     finally:
         # Очищаем активную задачу
-        if user_id in active_tasks:
-            del active_tasks[user_id]
+        active_tasks.pop(user_id, None)
 
 
 async def main():
