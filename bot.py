@@ -215,6 +215,51 @@ async def cmd_stats(message: Message):
     await message.answer(stats_text)
 
 
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    """Показывает последние запросы и позволяет переотправить файлы по file_id"""
+    user_id = message.from_user.id
+    rows = db.get_recent_requests(user_id, limit=5)
+    rows = [r for r in rows if r['success'] and r.get('reviews_file_id')]
+    if not rows:
+        await message.answer("📭 История пока пуста. Отправьте ссылку на товар, чтобы начать.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    lines = ["<b>📋 Последние запросы:</b>\n"]
+    for i, r in enumerate(rows, 1):
+        created = str(r['created_at'] or "")[:16]
+        lines.append(
+            f"{i}. <b>{filter_label(r.get('filter_type'))}</b> | "
+            f"Отзывов: {r['reviews_count']} | Вопросов: {r['questions_count']} | "
+            f"Рейтинг: {r['avg_rating']}\n   📅 {created}"
+        )
+        builder.button(text=f"📥 Скачать #{i}", callback_data=f"dl:{r['id']}")
+    builder.adjust(2)
+    lines.append("\nНажмите кнопку, чтобы скачать файлы повторно.")
+    await message.answer("\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("dl:"))
+async def on_download(callback: CallbackQuery):
+    """Повторно отправляет ранее сгенерированные файлы по сохранённому file_id"""
+    req_id = int(callback.data.split(":", 1)[1])
+    rows = db.get_recent_requests(callback.from_user.id, limit=50)
+    row = next((r for r in rows if r['id'] == req_id), None)
+    if not row or not row.get('reviews_file_id'):
+        await callback.answer("Файлы не найдены.", show_alert=True)
+        return
+    await callback.message.answer("📦 Повторная отправка файлов:")
+    try:
+        await callback.message.answer_document(row['reviews_file_id'])
+        if row.get('questions_file_id'):
+            await callback.message.answer_document(row['questions_file_id'])
+        await callback.answer("Файлы отправлены!")
+    except Exception as e:
+        logger.error(f"Не удалось переотправить файлы: {e}")
+        await callback.answer("Файл недоступен, соберите заново.", show_alert=True)
+
+
 @dp.message(Command("admin_stats"))
 async def cmd_admin_stats(message: Message):
     """Показывает общую статистику бота (только для админов)"""
