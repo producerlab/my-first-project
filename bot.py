@@ -304,6 +304,10 @@ async def handle_url(message: Message, state: FSMContext):
 
     logger.info(f"Пользователь {user_id} ({username}) отправил: {raw}")
 
+    # Сбрасываем устаревшее FSM-состояние, чтобы новая ссылка/артикул
+    # всегда начинались с чистого листа и не оставляли висящую клавиатуру
+    await state.clear()
+
     # Валидация URL/артикула через URLValidator
     try:
         sanitized_url = URLValidator.sanitize_url(raw)
@@ -360,9 +364,6 @@ async def run_collection(message: Message, user_id: int, data: dict):
     filter_type = data['filter']
     parser = wb_parser
 
-    # Отмечаем задачу как активную
-    active_tasks[user_id] = {'cancelled': False, 'marketplace': marketplace}
-
     # Проверяем rate limit
     can_request, remaining = db.check_rate_limit(user_id, RATE_LIMIT_REQUESTS, RATE_LIMIT_HOURS)
     if not can_request:
@@ -372,11 +373,13 @@ async def run_collection(message: Message, user_id: int, data: dict):
             f"Доступно: {RATE_LIMIT_REQUESTS} запросов в {RATE_LIMIT_HOURS} час.\n"
             f"Пожалуйста, подождите немного и попробуйте снова."
         )
-        active_tasks.pop(user_id, None)
         return
 
     # Добавляем запись о rate limit
     db.add_rate_limit_record(user_id)
+
+    # Отмечаем задачу как активную (после прохождения rate-limit)
+    active_tasks[user_id] = {'cancelled': False, 'marketplace': marketplace}
 
     # Уведомляем пользователя о начале парсинга
     status_msg = await message.answer(
@@ -401,6 +404,8 @@ async def run_collection(message: Message, user_id: int, data: dict):
                 )
         except Exception as e:
             logger.error(f"Ошибка обновления прогресса: {e}")
+
+    files_to_send = []
 
     try:
         logger.info(f"Начало парсинга {marketplace} для пользователя {user_id} (фильтр={filter_type})")
@@ -444,11 +449,6 @@ async def run_collection(message: Message, user_id: int, data: dict):
         formatted_reviews = parser.format_reviews_for_excel(reviews) if reviews else []
         formatted_questions = parser.format_questions_for_excel(questions) if questions and hasattr(parser, 'format_questions_for_excel') else []
 
-        # Debug логирование
-        logger.info(f"DEBUG: questions count={len(questions)}, formatted_questions count={len(formatted_questions)}")
-        if questions:
-            logger.info(f"DEBUG: First question sample: {questions[0] if questions else 'None'}")
-
         # Создаем Excel файлы
         progress_text = f"📊 Найдено отзывов: {len(reviews)}\n"
         if questions and len(questions) > 0:
@@ -456,8 +456,6 @@ async def run_collection(message: Message, user_id: int, data: dict):
         progress_text += "⏳ Создаю Excel-файлы..."
 
         await status_msg.edit_text(progress_text)
-
-        files_to_send = []
 
         # Создаём файл с отзывами
         if formatted_reviews:
@@ -517,11 +515,6 @@ async def run_collection(message: Message, user_id: int, data: dict):
 
         logger.info(f"Успешно отправлены файлы пользователю {user_id}")
 
-        # Удаляем временные файлы
-        for _, filepath, _ in files_to_send:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
     except ValueError as e:
         logger.error(f"Ошибка валидации: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
@@ -538,6 +531,10 @@ async def run_collection(message: Message, user_id: int, data: dict):
     finally:
         # Очищаем активную задачу
         active_tasks.pop(user_id, None)
+        # Удаляем временные файлы (даже если упали после их создания)
+        for _, filepath, _ in files_to_send:
+            if os.path.exists(filepath):
+                os.remove(filepath)
 
 
 async def main():
