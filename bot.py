@@ -5,8 +5,11 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 
 from wb_parser_playwright import WildberriesParserPlaywright
@@ -71,6 +74,52 @@ ADMIN_IDS = Config.ADMIN_IDS
 
 # Словарь для отслеживания активных задач парсинга
 active_tasks = {}
+
+
+# ─── Фильтр отзывов по звёздам ────────────────────────────────────────────────
+class CollectStates(StatesGroup):
+    waiting_filter = State()
+
+
+FILTER_LABELS = {
+    "all": "⭐ Все отзывы",
+    "1": "1★",
+    "1-2": "1–2★",
+    "1-3": "1–3★",
+    "4-5": "4–5★",
+}
+
+
+def build_filter_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⭐ Все отзывы", callback_data="flt:all")
+    builder.button(text="1★", callback_data="flt:1")
+    builder.button(text="1–2★", callback_data="flt:1-2")
+    builder.button(text="1–3★", callback_data="flt:1-3")
+    builder.button(text="4–5★", callback_data="flt:4-5")
+    builder.button(text="🔢 Выбрать вручную", callback_data="flt:custom")
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
+
+
+def build_star_keyboard(selected: set) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for star in range(1, 6):
+        mark = "✅ " if star in selected else ""
+        builder.button(text=f"{mark}{star}★", callback_data=f"star:{star}")
+    builder.button(text="✅ Готово", callback_data="flt:done")
+    builder.button(text="🔙 Назад", callback_data="flt:back")
+    builder.adjust(5, 2)
+    return builder.as_markup()
+
+
+def filter_label(filter_type: str) -> str:
+    """Человекочитаемая метка фильтра (для сводки и /history)."""
+    if filter_type in FILTER_LABELS:
+        return FILTER_LABELS[filter_type]
+    if filter_type and "," in filter_type:
+        return "★ " + ", ".join(f"{s}★" for s in filter_type.split(","))
+    return f"{filter_type}★" if filter_type else "⭐ Все отзывы"
 
 
 async def check_subscription(user_id: int) -> bool:
