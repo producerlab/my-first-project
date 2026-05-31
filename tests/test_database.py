@@ -254,3 +254,31 @@ class TestDatabase:
         cursor.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         assert result[0] == malicious_username
+
+    def test_add_request_stores_new_fields(self, temp_db):
+        """Тест что add_request сохраняет новые поля"""
+        temp_db.add_or_update_user(1, "u", "f", "l")
+        temp_db.add_request(
+            user_id=1, marketplace="Wildberries",
+            product_url="https://www.wildberries.ru/catalog/12345678/detail.aspx",
+            reviews_count=33, success=True,
+            filter_type="1-3", questions_count=32, avg_rating=2.1,
+            reviews_file_id="REV_FILE_ID", questions_file_id="Q_FILE_ID",
+        )
+        rows = temp_db.get_recent_requests(1, limit=5)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r['filter_type'] == "1-3"
+        assert r['questions_count'] == 32
+        assert r['avg_rating'] == 2.1
+        assert r['reviews_file_id'] == "REV_FILE_ID"
+        assert r['questions_file_id'] == "Q_FILE_ID"
+        assert 'id' in r
+
+    def test_add_request_backward_compatible(self, temp_db):
+        """Тест обратной совместимости add_request без новых полей"""
+        temp_db.add_or_update_user(2, "u", "f", "l")
+        temp_db.add_request(2, "Wildberries", "https://x", 0, success=False,
+                            error_message="нет данных")
+        rows = temp_db.get_recent_requests(2, limit=5)
+        assert rows[0]['success'] is False
