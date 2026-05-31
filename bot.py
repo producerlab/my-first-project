@@ -4,6 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -591,7 +592,10 @@ async def on_star_toggle(callback: CallbackQuery, state: FSMContext):
     else:
         stars.add(star)
     await state.update_data(custom_stars=sorted(stars))
-    await callback.message.edit_reply_markup(reply_markup=build_star_keyboard(stars))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_star_keyboard(stars))
+    except TelegramBadRequest:
+        pass  # разметка не изменилась (двойной тап) — игнорируем
     await callback.answer()
 
 
