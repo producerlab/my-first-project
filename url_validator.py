@@ -132,6 +132,7 @@ class URLValidator:
     def sanitize_url(cls, url: str) -> str:
         """
         Очищает URL от потенциально опасных параметров.
+        Если передан чистый артикул (6–12 цифр), возвращает канонический URL товара WB.
 
         Args:
             url: URL для очистки
@@ -141,6 +142,10 @@ class URLValidator:
         """
         # Удаление пробелов по краям
         url = url.strip()
+
+        # Чистый артикул (6-12 цифр) → канонический URL товара WB
+        if url.isdigit() and 6 <= len(url) <= 12:
+            return f'https://www.wildberries.ru/catalog/{url}/detail.aspx'
 
         # Удаление опасных протоколов
         dangerous_protocols = ['javascript:', 'data:', 'file:', 'vbscript:']

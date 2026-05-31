@@ -4,12 +4,16 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 
-from wb_parser_playwright import WildberriesParserPlaywright
+from wb_parser_playwright import WildberriesParserPlaywright, filter_reviews_by_rating
 from excel_exporter import ExcelExporter
 from config import Config
 from url_validator import URLValidator
@@ -73,6 +77,49 @@ ADMIN_IDS = Config.ADMIN_IDS
 active_tasks = {}
 
 
+# ─── Фильтр отзывов по звёздам ────────────────────────────────────────────────
+class CollectStates(StatesGroup):
+    waiting_filter = State()
+
+
+FILTER_LABELS = {
+    "all": "⭐ Все отзывы",
+    "1": "1★",
+    "1-2": "1–2★",
+    "1-3": "1–3★",
+    "4-5": "4–5★",
+}
+
+
+def build_filter_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for key, label in FILTER_LABELS.items():
+        builder.button(text=label, callback_data=f"flt:{key}")
+    builder.button(text="🔢 Выбрать вручную", callback_data="flt:custom")
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
+
+
+def build_star_keyboard(selected: set[int]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for star in range(1, 6):
+        mark = "✅ " if star in selected else ""
+        builder.button(text=f"{mark}{star}★", callback_data=f"star:{star}")
+    builder.button(text="✅ Готово", callback_data="flt:done")
+    builder.button(text="🔙 Назад", callback_data="flt:back")
+    builder.adjust(5, 2)
+    return builder.as_markup()
+
+
+def filter_label(filter_type: str) -> str:
+    """Человекочитаемая метка фильтра (для сводки и /history)."""
+    if filter_type in FILTER_LABELS:
+        return FILTER_LABELS[filter_type]
+    if filter_type and "," in filter_type:
+        return "★ " + ", ".join(f"{s}★" for s in filter_type.split(","))
+    return f"{filter_type}★" if filter_type else "⭐ Все отзывы"
+
+
 async def check_subscription(user_id: int) -> bool:
     """Проверяет подписку пользователя на канал"""
     try:
@@ -111,19 +158,24 @@ async def cmd_help(message: Message):
     await message.answer(
         "📚 Инструкция:\n\n"
         f"1. ⚠️ Подпишись на канал: {REQUIRED_CHANNEL}\n"
-        "2. Скопируй ссылку на товар с Wildberries\n"
-        "3. Отправь мне ссылку\n"
+        "2. Отправь ссылку на товар с Wildberries или просто артикул (например 12345678)\n"
+        "3. Выбери фильтр отзывов по звёздам (или «Все»). Вопросы собираются всегда полностью\n"
         "4. Получи Excel-файлы с отзывами и вопросами\n\n"
         "📊 Что будет в файлах:\n"
         "• Отзывы: текст, рейтинг, дата, автор, плюсы, минусы\n"
         "• Вопросы: вопрос, ответ, дата, автор\n\n"
+        "🧰 Команды:\n"
+        "• /history — последние 5 запусков, можно скачать файлы повторно\n"
+        "• /cancel — отменить текущий сбор\n"
+        "• /stats — ваша статистика\n\n"
         f"⚡ Лимит: {RATE_LIMIT_REQUESTS} запросов в час"
     )
 
 
 @dp.message(Command("cancel"))
-async def cmd_cancel(message: Message):
-    """Отменяет текущий парсинг"""
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отменяет текущий парсинг и сбрасывает выбор фильтра"""
+    await state.clear()
     user_id = message.from_user.id
 
     if user_id in active_tasks:
@@ -166,6 +218,62 @@ async def cmd_stats(message: Message):
             stats_text += f"{success_icon} {req['marketplace']} - {req['reviews_count']} отзывов ({req['created_at'][:10]})\n"
 
     await message.answer(stats_text)
+
+
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    """Показывает последние запросы и позволяет переотправить файлы по file_id"""
+    user_id = message.from_user.id
+    rows = db.get_recent_requests(user_id, limit=20)
+    rows = [r for r in rows if r['success'] and (r.get('reviews_file_id') or r.get('questions_file_id'))]
+    rows = rows[:5]
+    if not rows:
+        await message.answer("📭 История пока пуста. Отправьте ссылку на товар, чтобы начать.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    lines = ["<b>📋 Последние запросы:</b>\n"]
+    for i, r in enumerate(rows, 1):
+        created = str(r['created_at'] or "")[:16]
+        lines.append(
+            f"{i}. <b>{filter_label(r.get('filter_type'))}</b> | "
+            f"Отзывов: {r['reviews_count']} | Вопросов: {r['questions_count']} | "
+            f"Рейтинг: {r['avg_rating']}\n   📅 {created}"
+        )
+        builder.button(text=f"📥 Скачать #{i}", callback_data=f"dl:{r['id']}")
+    builder.adjust(2)
+    lines.append("\nНажмите кнопку, чтобы скачать файлы повторно.")
+    await message.answer("\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("dl:"))
+async def on_download(callback: CallbackQuery):
+    """Повторно отправляет ранее сгенерированные файлы по сохранённому file_id"""
+    try:
+        req_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный запрос.", show_alert=True)
+        return
+    rows = db.get_recent_requests(callback.from_user.id, limit=50)
+    row = next((r for r in rows if r['id'] == req_id), None)
+    if not row or not (row.get('reviews_file_id') or row.get('questions_file_id')):
+        await callback.answer("Файлы не найдены.", show_alert=True)
+        return
+    try:
+        sent_any = False
+        if row.get('reviews_file_id'):
+            await callback.message.answer_document(row['reviews_file_id'])
+            sent_any = True
+        if row.get('questions_file_id'):
+            await callback.message.answer_document(row['questions_file_id'])
+            sent_any = True
+        if sent_any:
+            await callback.answer("Файлы отправлены!")
+        else:
+            await callback.answer("Файлы не найдены.", show_alert=True)
+    except Exception as e:
+        logger.error(f"Не удалось переотправить файлы: {e}")
+        await callback.answer("Файл недоступен, соберите заново.", show_alert=True)
 
 
 @dp.message(Command("admin_stats"))
@@ -240,12 +348,13 @@ async def cmd_admin_broadcast(message: Message):
 
 
 @dp.message(F.text, F.chat.type == "private")
-async def handle_url(message: Message):
-    """Обработчик URL товара. Работает только в личных сообщениях —
-    в группах (например, в Tech Alerts) бот не реагирует на текст."""
+async def handle_url(message: Message, state: FSMContext):
+    """Принимает ссылку или артикул, валидирует, проверяет подписку,
+    показывает кнопки фильтра. Сбор запускается после выбора фильтра.
+    Работает только в личных сообщениях — в группах бот не реагирует на текст."""
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
-    url = message.text.strip()
+    raw = message.text.strip()
 
     # Сохраняем/обновляем пользователя
     db.add_or_update_user(
@@ -255,15 +364,19 @@ async def handle_url(message: Message):
         message.from_user.last_name
     )
 
-    logger.info(f"Пользователь {user_id} ({username}) отправил URL: {url}")
+    logger.info(f"Пользователь {user_id} ({username}) отправил: {raw}")
 
-    # Валидация URL через URLValidator
+    # Сбрасываем устаревшее FSM-состояние, чтобы новая ссылка/артикул
+    # всегда начинались с чистого листа и не оставляли висящую клавиатуру
+    await state.clear()
+
+    # Валидация URL/артикула через URLValidator
     try:
-        sanitized_url = URLValidator.sanitize_url(url)
+        sanitized_url = URLValidator.sanitize_url(raw)
         marketplace_code, product_id = URLValidator.validate_url(sanitized_url)
         url = sanitized_url  # Используем очищенный URL
     except InvalidURLError as e:
-        logger.warning(f"Невалидный URL от {user_id}: {e}")
+        logger.warning(f"Невалидный ввод от {user_id}: {e}")
         await message.answer(
             f"❌ {e.reason}\n\n"
             "Используйте /help для получения инструкций."
@@ -279,9 +392,6 @@ async def handle_url(message: Message):
         )
         return
 
-    marketplace = 'Wildberries'
-    parser = wb_parser
-
     # Проверяем подписку на канал
     is_subscribed = await check_subscription(user_id)
     if not is_subscribed:
@@ -294,9 +404,30 @@ async def handle_url(message: Message):
         )
         return
 
+    # Сохраняем данные в FSM и показываем кнопки фильтра.
+    # Rate-limit проверяется и списывается только при запуске сбора (run_collection).
+    await state.set_state(CollectStates.waiting_filter)
+    await state.update_data(
+        url=url, product_id=product_id, marketplace='Wildberries', custom_stars=[]
+    )
+    await message.answer(
+        f"✅ <b>Товар найден!</b> Артикул: <code>{product_id}</code>\n\n"
+        "Выберите фильтр для отзывов (вопросы собираются всегда полностью):",
+        reply_markup=build_filter_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+async def run_collection(message: Message, user_id: int, data: dict):
+    """Выполняет сбор: rate-limit → парсинг → фильтрация → Excel → отправка → сводка → file_id."""
+    url = data['url']
+    product_id = data['product_id']
+    marketplace = data['marketplace']
+    filter_type = data['filter']
+    parser = wb_parser
+
     # Проверяем rate limit
     can_request, remaining = db.check_rate_limit(user_id, RATE_LIMIT_REQUESTS, RATE_LIMIT_HOURS)
-
     if not can_request:
         logger.warning(f"Пользователь {user_id} превысил лимит запросов")
         await message.answer(
@@ -309,7 +440,7 @@ async def handle_url(message: Message):
     # Добавляем запись о rate limit
     db.add_rate_limit_record(user_id)
 
-    # Отмечаем задачу как активную
+    # Отмечаем задачу как активную (после прохождения rate-limit)
     active_tasks[user_id] = {'cancelled': False, 'marketplace': marketplace}
 
     # Уведомляем пользователя о начале парсинга
@@ -336,8 +467,10 @@ async def handle_url(message: Message):
         except Exception as e:
             logger.error(f"Ошибка обновления прогресса: {e}")
 
+    files_to_send = []
+
     try:
-        logger.info(f"Начало парсинга {marketplace} для пользователя {user_id}")
+        logger.info(f"Начало парсинга {marketplace} для пользователя {user_id} (фильтр={filter_type})")
 
         # Парсим отзывы (и вопросы для WB)
         result = await parser.get_reviews(url, progress_callback=update_progress)
@@ -346,34 +479,37 @@ async def handle_url(message: Message):
         if user_id in active_tasks and active_tasks[user_id]['cancelled']:
             logger.info(f"Парсинг отменён пользователем {user_id}")
             await status_msg.edit_text("⛔ Парсинг отменён")
-            del active_tasks[user_id]
+            active_tasks.pop(user_id, None)
             return
 
         # Результат - dict с reviews и questions
-        reviews = result.get('reviews', [])
+        reviews_all = result.get('reviews', [])
         questions = result.get('questions', [])
+        total_reviews_raw = len(reviews_all)
+
+        # Фильтрация отзывов по выбранному фильтру
+        reviews = filter_reviews_by_rating(reviews_all, filter_type)
+        avg_rating = round(
+            sum(r.get('rating', 0) for r in reviews) / len(reviews), 1
+        ) if reviews else 0
 
         if not reviews and not questions:
             logger.warning(f"Не найдено отзывов и вопросов: {url}")
             await status_msg.edit_text(
-                f"😔 Не удалось найти отзывы по этой ссылке.\n\n"
+                "😔 Не удалось найти отзывы по этой ссылке.\n\n"
                 "Возможные причины:\n"
                 "• Товар ещё не имеет отзывов\n"
-                "• Неверная ссылка\n"
+                "• Под выбранный фильтр ничего не попало\n"
                 "• Маркетплейс изменил API"
             )
             db.add_request(user_id, marketplace, url, 0, success=False,
-                          error_message="Отзывы не найдены")
+                           error_message="Отзывы не найдены", filter_type=filter_type)
+            active_tasks.pop(user_id, None)
             return
 
         # Форматируем для Excel
         formatted_reviews = parser.format_reviews_for_excel(reviews) if reviews else []
         formatted_questions = parser.format_questions_for_excel(questions) if questions and hasattr(parser, 'format_questions_for_excel') else []
-
-        # Debug логирование
-        logger.info(f"DEBUG: questions count={len(questions)}, formatted_questions count={len(formatted_questions)}")
-        if questions:
-            logger.info(f"DEBUG: First question sample: {questions[0] if questions else 'None'}")
 
         # Создаем Excel файлы
         progress_text = f"📊 Найдено отзывов: {len(reviews)}\n"
@@ -382,8 +518,6 @@ async def handle_url(message: Message):
         progress_text += "⏳ Создаю Excel-файлы..."
 
         await status_msg.edit_text(progress_text)
-
-        files_to_send = []
 
         # Создаём файл с отзывами
         if formatted_reviews:
@@ -403,36 +537,51 @@ async def handle_url(message: Message):
             logger.info(f"Создан файл вопросов: {questions_filepath} ({len(questions)} вопросов)")
             files_to_send.append(('questions', questions_filepath, len(questions)))
 
-        # Отправляем файлы пользователю
+        # Отправляем файлы пользователю, захватывая file_id
+        reviews_file_id = None
+        questions_file_id = None
         for file_type, filepath, count in files_to_send:
             file = FSInputFile(filepath)
             file_name = "отзывов" if file_type == 'reviews' else "вопросов"
-            await message.answer_document(
+            sent = await message.answer_document(
                 file,
                 caption=f"✅ Готово!\n\n"
                         f"📊 Собрано {file_name}: {count}\n"
                         f"🏪 Маркетплейс: {marketplace}\n"
                         f"📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             )
+            if sent.document:
+                if file_type == 'reviews':
+                    reviews_file_id = sent.document.file_id
+                else:
+                    questions_file_id = sent.document.file_id
 
-        await status_msg.delete()
+        # Сводка
+        await status_msg.edit_text(
+            "✅ <b>Готово!</b>\n\n"
+            f"📦 Артикул: <code>{product_id}</code>\n"
+            f"🔍 Фильтр: {filter_label(filter_type)}\n"
+            f"⭐ Отзывов: <b>{len(reviews)}</b> (всего {total_reviews_raw} без фильтра)\n"
+            f"❓ Вопросов: <b>{len(questions)}</b>\n"
+            f"📊 Средний рейтинг: <b>{avg_rating}</b>",
+            parse_mode="HTML",
+        )
 
         # Сохраняем успешный запрос в БД
-        total_items = len(reviews) + len(questions)
-        db.add_request(user_id, marketplace, url, total_items, success=True)
+        db.add_request(
+            user_id, marketplace, url, len(reviews), success=True,
+            filter_type=filter_type, questions_count=len(questions),
+            avg_rating=avg_rating, reviews_file_id=reviews_file_id,
+            questions_file_id=questions_file_id,
+        )
 
         logger.info(f"Успешно отправлены файлы пользователю {user_id}")
-
-        # Удаляем временные файлы
-        for _, filepath, _ in files_to_send:
-            if os.path.exists(filepath):
-                os.remove(filepath)
 
     except ValueError as e:
         logger.error(f"Ошибка валидации: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
         db.add_request(user_id, marketplace, url, 0, success=False,
-                      error_message=str(e))
+                       error_message=str(e), filter_type=filter_type)
     except Exception as e:
         logger.error(f"Неожиданная ошибка при парсинге: {e}", exc_info=True)
         await status_msg.edit_text(
@@ -440,11 +589,75 @@ async def handle_url(message: Message):
             "Попробуйте другую ссылку или обратитесь к администратору."
         )
         db.add_request(user_id, marketplace, url, 0, success=False,
-                      error_message=str(e))
+                       error_message=str(e), filter_type=filter_type)
     finally:
         # Очищаем активную задачу
-        if user_id in active_tasks:
-            del active_tasks[user_id]
+        active_tasks.pop(user_id, None)
+        # Удаляем временные файлы (даже если упали после их создания)
+        for _, filepath, _ in files_to_send:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+
+@dp.callback_query(F.data.startswith("flt:"), CollectStates.waiting_filter)
+async def on_filter(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    if not data.get('url'):
+        await callback.message.edit_text("⚠️ Сессия устарела, отправьте ссылку заново.")
+        await state.clear()
+        await callback.answer()
+        return
+
+    if key == "custom":
+        await state.update_data(custom_stars=[])
+        await callback.message.edit_text(
+            "🔢 <b>Выберите нужные оценки:</b>",
+            reply_markup=build_star_keyboard(set()), parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    if key == "back":
+        await state.update_data(custom_stars=[])
+        await callback.message.edit_text(
+            "Выберите фильтр для отзывов:", reply_markup=build_filter_keyboard()
+        )
+        await callback.answer()
+        return
+
+    if key == "done":
+        stars = sorted(set(data.get('custom_stars', [])))
+        if not stars:
+            await callback.answer("❌ Выберите хотя бы одну оценку!", show_alert=True)
+            return
+        filter_type = ",".join(str(s) for s in stars)
+    else:
+        filter_type = key  # all / 1 / 1-2 / 1-3 / 4-5
+
+    await state.update_data(filter=filter_type)
+    data = await state.get_data()
+    await callback.message.edit_text(f"⏳ Запускаю сбор (фильтр: {filter_label(filter_type)})...")
+    await callback.answer()
+    await state.clear()
+    await run_collection(callback.message, callback.from_user.id, data)
+
+
+@dp.callback_query(F.data.startswith("star:"), CollectStates.waiting_filter)
+async def on_star_toggle(callback: CallbackQuery, state: FSMContext):
+    star = int(callback.data.split(":", 1)[1])
+    data = await state.get_data()
+    stars = set(data.get('custom_stars', []))
+    if star in stars:
+        stars.discard(star)
+    else:
+        stars.add(star)
+    await state.update_data(custom_stars=sorted(stars))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_star_keyboard(stars))
+    except TelegramBadRequest:
+        pass  # разметка не изменилась (двойной тап) — игнорируем
+    await callback.answer()
 
 
 async def main():

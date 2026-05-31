@@ -53,6 +53,20 @@ class Database:
             )
         ''')
 
+        # Миграция: добавляем новые колонки, если их ещё нет (старая БД)
+        cursor.execute("PRAGMA table_info(requests)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        new_cols = {
+            'filter_type': "TEXT",
+            'questions_count': "INTEGER DEFAULT 0",
+            'avg_rating': "REAL DEFAULT 0",
+            'reviews_file_id': "TEXT",
+            'questions_file_id': "TEXT",
+        }
+        for col, decl in new_cols.items():
+            if col not in existing_cols:
+                cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} {decl}")
+
         conn.commit()
         conn.close()
 
@@ -87,19 +101,27 @@ class Database:
         product_url: str,
         reviews_count: int,
         success: bool = True,
-        error_message: str = None
+        error_message: str = None,
+        filter_type: str = None,
+        questions_count: int = 0,
+        avg_rating: float = 0,
+        reviews_file_id: str = None,
+        questions_file_id: str = None
     ):
         """Добавляет запрос в историю и обновляет счётчик пользователя"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Добавляем запрос
         cursor.execute('''
-            INSERT INTO requests (user_id, marketplace, product_url, reviews_count, success, error_message)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, marketplace, product_url, reviews_count, 1 if success else 0, error_message))
+            INSERT INTO requests (
+                user_id, marketplace, product_url, reviews_count, success, error_message,
+                filter_type, questions_count, avg_rating, reviews_file_id, questions_file_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, marketplace, product_url, reviews_count, 1 if success else 0,
+              error_message, filter_type, questions_count, avg_rating,
+              reviews_file_id, questions_file_id))
 
-        # Обновляем счётчик запросов пользователя
         cursor.execute('''
             UPDATE users SET total_requests = total_requests + 1 WHERE user_id = ?
         ''', (user_id,))
@@ -173,7 +195,9 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT marketplace, product_url, reviews_count, created_at, success
+            SELECT id, marketplace, product_url, reviews_count, created_at, success,
+                   filter_type, questions_count, avg_rating,
+                   reviews_file_id, questions_file_id
             FROM requests
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -185,11 +209,17 @@ class Database:
 
         return [
             {
-                'marketplace': row[0],
-                'product_url': row[1],
-                'reviews_count': row[2],
-                'created_at': row[3],
-                'success': bool(row[4])
+                'id': row[0],
+                'marketplace': row[1],
+                'product_url': row[2],
+                'reviews_count': row[3],
+                'created_at': row[4],
+                'success': bool(row[5]),
+                'filter_type': row[6],
+                'questions_count': row[7],
+                'avg_rating': row[8],
+                'reviews_file_id': row[9],
+                'questions_file_id': row[10],
             }
             for row in rows
         ]

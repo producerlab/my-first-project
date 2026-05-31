@@ -8,7 +8,7 @@
 
 Telegram-бот **ParserReview** — парсер отзывов и вопросов с Wildberries.
 
-Пользователь отправляет ссылку на товар → бот открывает страницу в headless Chromium через Playwright, перехватывает ответы WB API, извлекает отзывы/вопросы, анализирует тональность, генерирует Excel-файл и отправляет его обратно в Telegram.
+Пользователь отправляет ссылку на товар (или просто артикул `12345678`) → бот предлагает inline-кнопки фильтра отзывов по звёздам (Все / 1★ / 1–2★ / 1–3★ / 4–5★ / ручной выбор галочками) → после выбора открывает страницу в headless Chromium через Playwright, перехватывает ответы WB API, извлекает отзывы/вопросы, фильтрует отзывы по выбранным звёздам (вопросы — всегда полностью), анализирует тональность, генерирует Excel-файл и отправляет его обратно в Telegram со сводкой. Команда `/history` показывает последние 5 успешных запусков с повторным скачиванием файлов через Telegram file_id (без пересбора).
 
 Язык: **Python 3.11**. Интерфейс бота и комментарии в коде — **русский**.
 
@@ -23,8 +23,7 @@ Telegram-бот **ParserReview** — парсер отзывов и вопрос
 | `excel_exporter.py` | Генерация Excel: форматирование, цвета, диаграммы |
 | `sentiment_analyzer.py` | Словарный анализ тональности на русском |
 | `url_validator.py` | Валидация и санитизация URL (WB / Ozon) |
-| `database.py` | SQLite-реализация слоя данных |
-| `supabase_database.py` | Supabase-реализация (тот же интерфейс, что и `database.py`) |
+| `database.py` | SQLite-реализация слоя данных (история запросов, rate-limit, пользователи) |
 | `config.py` | Загрузка `.env`, типизация, дефолты |
 | `exceptions.py` | Иерархия кастомных исключений |
 
@@ -32,8 +31,10 @@ Telegram-бот **ParserReview** — парсер отзывов и вопрос
 
 ## Архитектурные решения
 
-### Двойная база данных
-`database.py` (SQLite) и `supabase_database.py` реализуют **идентичный интерфейс**. Переключение — через `Config.use_supabase()`, который проверяет наличие `SUPABASE_URL` и `SUPABASE_KEY` в окружении. Локально — SQLite, на Railway — Supabase (потому что Railway не даёт персистентного диска).
+### База данных
+`database.py` — SQLite-реализация слоя данных. (Историческое примечание: планировалась двойная БД с `supabase_database.py` для Railway, но этот файл в репозитории отсутствует — сейчас используется только SQLite.)
+
+Таблица `requests` хранит историю запросов, включая `filter_type`, `questions_count`, `avg_rating`, `reviews_file_id`, `questions_file_id` (последние два — Telegram file_id для `/history`). Схема мигрируется идемпотентно в `init_database()` через `PRAGMA table_info` + `ALTER TABLE`.
 
 ### Перехват API вместо прямых запросов
 Парсер не ломится напрямую к WB API. Вместо этого открывает реальную страницу и перехватывает network-ответы через Playwright. Это обходит большинство защит. При неудаче — DOM-fallback через BeautifulSoup.
@@ -87,10 +88,13 @@ pytest                          # запуск всех тестов
 pytest --cov=. --cov-report=html  # с покрытием
 ```
 
-Три файла в `tests/`:
-- `test_url_validator.py` — 30 тестов
-- `test_sentiment_analyzer.py` — 17 тестов
-- `test_database.py` — 14 тестов
+Файлы в `tests/`:
+- `test_url_validator.py` — валидация URL и приём чистого артикула (зелёные)
+- `test_filter.py` — фильтрация отзывов по звёздам `filter_reviews_by_rating` (зелёные)
+- `test_database.py` — слой БД. ⚠️ Класс `TestDatabase` (14 тестов) **сломан на main**: написан под несуществующий API (`add_user`, `log_request`, `.conn`, `.close()`). Зелёные — только новые тесты полей/миграции `requests`.
+- `test_sentiment_analyzer.py` — ⚠️ 13 из 15 **падают на main** (предсуществующий tech-debt, не регрессия).
+
+При проверке регрессий сверяйся с конкретными затронутыми файлами через `git diff main`, а не с общим `pytest`.
 
 ---
 
@@ -121,5 +125,5 @@ docker-compose up -d
 | Добавить поля в Excel | `excel_exporter.py` |
 | Добавить слова тональности | `sentiment_analyzer.py` — словари `POSITIVE_WORDS` / `NEGATIVE_WORDS` |
 | Добавить поддержку нового маркетплейса | `url_validator.py` + новый `*_parser.py` |
-| Изменить схему БД | `database.py` + `supabase_database.py` (оба!) |
+| Изменить схему БД | `database.py` (миграция через `ALTER TABLE` в `init_database`) |
 | Добавить env-переменную | `config.py` + `.env.example` |
