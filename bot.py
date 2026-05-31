@@ -158,19 +158,24 @@ async def cmd_help(message: Message):
     await message.answer(
         "📚 Инструкция:\n\n"
         f"1. ⚠️ Подпишись на канал: {REQUIRED_CHANNEL}\n"
-        "2. Скопируй ссылку на товар с Wildberries\n"
-        "3. Отправь мне ссылку\n"
+        "2. Отправь ссылку на товар с Wildberries или просто артикул (например 12345678)\n"
+        "3. Выбери фильтр отзывов по звёздам (или «Все»). Вопросы собираются всегда полностью\n"
         "4. Получи Excel-файлы с отзывами и вопросами\n\n"
         "📊 Что будет в файлах:\n"
         "• Отзывы: текст, рейтинг, дата, автор, плюсы, минусы\n"
         "• Вопросы: вопрос, ответ, дата, автор\n\n"
+        "🧰 Команды:\n"
+        "• /history — последние 5 запусков, можно скачать файлы повторно\n"
+        "• /cancel — отменить текущий сбор\n"
+        "• /stats — ваша статистика\n\n"
         f"⚡ Лимит: {RATE_LIMIT_REQUESTS} запросов в час"
     )
 
 
 @dp.message(Command("cancel"))
-async def cmd_cancel(message: Message):
-    """Отменяет текущий парсинг"""
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отменяет текущий парсинг и сбрасывает выбор фильтра"""
+    await state.clear()
     user_id = message.from_user.id
 
     if user_id in active_tasks:
