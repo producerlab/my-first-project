@@ -537,6 +537,64 @@ async def run_collection(message: Message, user_id: int, data: dict):
                 os.remove(filepath)
 
 
+@dp.callback_query(F.data.startswith("flt:"), CollectStates.waiting_filter)
+async def on_filter(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    if not data.get('url'):
+        await callback.message.edit_text("⚠️ Сессия устарела, отправьте ссылку заново.")
+        await state.clear()
+        await callback.answer()
+        return
+
+    if key == "custom":
+        await state.update_data(custom_stars=[])
+        await callback.message.edit_text(
+            "🔢 <b>Выберите нужные оценки:</b>",
+            reply_markup=build_star_keyboard(set()), parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    if key == "back":
+        await state.update_data(custom_stars=[])
+        await callback.message.edit_text(
+            "Выберите фильтр для отзывов:", reply_markup=build_filter_keyboard()
+        )
+        await callback.answer()
+        return
+
+    if key == "done":
+        stars = sorted(set(data.get('custom_stars', [])))
+        if not stars:
+            await callback.answer("❌ Выберите хотя бы одну оценку!", show_alert=True)
+            return
+        filter_type = ",".join(str(s) for s in stars)
+    else:
+        filter_type = key  # all / 1 / 1-2 / 1-3 / 4-5
+
+    await state.update_data(filter=filter_type)
+    data = await state.get_data()
+    await callback.message.edit_text(f"⏳ Запускаю сбор (фильтр: {filter_label(filter_type)})...")
+    await callback.answer()
+    await state.clear()
+    await run_collection(callback.message, callback.from_user.id, data)
+
+
+@dp.callback_query(F.data.startswith("star:"), CollectStates.waiting_filter)
+async def on_star_toggle(callback: CallbackQuery, state: FSMContext):
+    star = int(callback.data.split(":", 1)[1])
+    data = await state.get_data()
+    stars = set(data.get('custom_stars', []))
+    if star in stars:
+        stars.discard(star)
+    else:
+        stars.add(star)
+    await state.update_data(custom_stars=sorted(stars))
+    await callback.message.edit_reply_markup(reply_markup=build_star_keyboard(stars))
+    await callback.answer()
+
+
 async def main():
     """Основная функция запуска бота"""
     # Очистка старых записей rate limit при старте
