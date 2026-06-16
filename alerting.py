@@ -52,6 +52,9 @@ THROTTLE_PATTERNS = (
     "connection reset by peer",
     "server disconnected",
     "clientconnectorerror",
+    "request timeout error",
+    "timeouterror",
+    "read timeout",
 )
 THROTTLE_WINDOW_SECONDS = 300  # 5 минут
 THROTTLE_THRESHOLD = 5         # алертим только начиная с N-й ошибки в окне
